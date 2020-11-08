@@ -1,5 +1,4 @@
 from seal import *
-from seal_helper import *
 
 # set parameters for BFV
 
