@@ -6,19 +6,53 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import pandas as pd
 
 from interface import *
+import time
+
+def test_basic():
+    # int_enc_a = EncryptedInteger.__create__(10)
+    # i = 0
+    # while True:
+    #     i += 1
+    #     int_enc_b = EncryptedInteger.__create__(20)
+    #     int_enc_a = int_enc_a.add(int_enc_b)
+    #     budget = evaluate_ciphertext(int_enc_a.ciphertext)
+    #     if budget == 0:
+    #         break
+
+    # print('Budget exhausted after %s iterations' %i)
+
+    # int_enc_a = EncryptedInteger.__create__(10)
+    # i = 0
+    # while True:
+    #     i += 1
+    #     int_enc_b = EncryptedInteger.__create__(20)
+    #     int_enc_a = int_enc_a.multiply(int_enc_b)
+    #     budget = evaluate_ciphertext(int_enc_a.ciphertext)
+    #     if budget == 0:
+    #         break
+
+    # print('Budget exhausted after %s iterations' %i)
+
+    real_enc = EncryptedReal.__create__(0.4456, 1024)
+    real_enc = real_enc.multiply_plain(0.543)
+    reveal_ciphertext(real_enc.int_enc.ciphertext)
+
+ 
+    # print('10*20=%s' %decrypt_int(int_enc_c))
+
 
 def test_dot_product():
     """
     Dot product test.
     """
-    v1 = np.random.uniform(-1, 1, 300)
-    v2 = np.random.uniform(-1, 1, 300)
+    v1 = np.random.uniform(-1, 1, 50)
+    v2 = np.random.uniform(-1, 1, 50)
 
     v1_encrypted = encrypt_real_vec(v1)
     v2_encrypted = encrypt_real_vec(v2)
+    result = v1_encrypted.dot_plain(v2)
 
-
-    print("Result via HE: %s" %decrypt_real(v1_encrypted.dot_plain(v2)))
+    print("Result via HE: %s" %decrypt_real(result))
     print("Numpy result: %s" %np.dot(v1, v2))
 
 
@@ -29,7 +63,7 @@ def test_matrix_mult():
     mat_b_enc = encrypt_real_mat(mat_b_plain)
 
     print("Adding...")
-    print("Non-HE result:")
+    print("Non-HE rfgesult:")
     print(mat_a_plain + mat_b_plain)
     print("HE result:")
     print(decrypt_real_mat(mat_a_enc.add(mat_b_enc)))
@@ -116,9 +150,63 @@ def test_logistic_regression():
     print('Classification accuracy: %s' %(np.sum(predictions == y_test) / len(predictions)))
 
 
+def error(a, b):
+    error_mat = np.abs((a - b) / a)
+    avg_error = round(np.average(error_mat), 3)
+    max_error = round(np.max(error_mat), 3)
+    print('Average error: %s' %avg_error)
+    print('Max error: %s' %max_error)
 
+def matrx_mult():
+    print('Matrix multiplication demo\n')
 
+    mat1 = np.random.uniform(-1, 1, (30, 30))
+    mat2 = np.random.uniform(-1, 1, (30, 31))
+    a = np.matmul(mat1, mat2)
+    s = 1024
+
+    # print('Matrix multiplication via naive method...')
+    # start_time = time.time()
+    # enc_mat1 = EncryptedRealMatrix.__create__(mat1, scale=s)
+    # enc_mat2 = EncryptedRealMatrix.__create__(mat2, scale=s)
+    # enc_result = enc_mat1.mult(enc_mat2)
+    # print("--- Took %s seconds ---" % (time.time() - start_time))
+    # b = np.array(decrypt_real_mat(enc_result))
+    # error(a, b)
+
+    print()
+    print('Matrix multiplication via permutation method...')
+    start_time = time.time()
+    batched_mat1 = BatchedMat(mat1, scale=s, shape=mat1.shape)
+    batched_mat2 = BatchedMat(mat2, scale=s, shape=mat2.shape)
+    b = batched_mat1.mult(batched_mat2).debug()
+    print("--- Took %s seconds ---" % (time.time() - start_time))
+    error(a, b)
+
+def dot_prod():
+    vec1 = np.random.uniform(-1, 1, 60)
+    vec2 = np.random.uniform(-1, 1, 60)
+
+    a = np.array([np.dot(vec1, vec2)])
+
+    print('Vector dot product via naive method...')
+    start_time = time.time()
+    v1_encrypted = encrypt_real_vec(vec1)
+    v2_encrypted = encrypt_real_vec(vec2)
+    b = np.array([decrypt_real(v1_encrypted.dot(v2_encrypted))])
+    print("--- Took %s seconds ---" % (time.time() - start_time))
+    error(a, b)
+
+    print('Vector dot product via batching method...')
+    start_time = time.time()
+
+    v1_encrypted = BatchedVec(vec1, scale=1024)
+    v2_encrypted = BatchedVec(vec2, scale=1024)
+    b = np.array([v1_encrypted.dot(v2_encrypted).debug()])
+
+    print("--- Took %s seconds ---" % (time.time() - start_time))
+    error(a, b)
 
 if __name__ == '__main__':
-    print("starting")
-    test_matrix_mult()
+    matrx_mult()
+
