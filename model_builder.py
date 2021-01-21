@@ -1,13 +1,18 @@
 import numpy as np
 from typing import List
 
-from interface import BatchedRealMat, BatchedReal, Creator
+from schemes import *
+from lin_algebra import *
+from creator import Creator
+import math
 
 class Layer:
     def __init__(self, input_shape, output_shape):
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.weights = None
+        self.weight_scale = None
+        self.creator = None
 
     def check_input_shape(self, input_data: List[BatchedRealMat]):
         dim1 = len(input_data)
@@ -25,6 +30,9 @@ class Layer:
 
     def load_weights(self, weights: np.ndarray, extra: np.ndarray):
         pass
+
+    def set_weight_scale(self, scale):
+        self.weight_scale = scale
 
     def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
         return input_data
@@ -55,8 +63,11 @@ class ConvLayer(Layer):
         if len(input_shape) != 3:
             raise Exception('Expected convolution layer input to have 3 dimensions: received %s' % len(input_shape))
 
-        out_h = (input_shape[1] + self.padding * 2 - self.kernel_size[0] + 1) // 2
-        out_w = (input_shape[2] + self.padding * 2 - self.kernel_size[1] + 1) // 2
+        out_h = (input_shape[1] + self.padding * 2 - self.kernel_size[0] + 1) / self.stride
+        out_w = (input_shape[2] + self.padding * 2 - self.kernel_size[1] + 1) / self.stride
+
+        out_h = int(math.ceil(out_h))
+        out_w = int(math.ceil(out_w))
 
         if out_h < 1 or out_w < 1:
             raise Exception('Invalid convolutional layer output shape: (%s, %s)' % (out_h, out_w))
@@ -84,43 +95,46 @@ class ConvLayer(Layer):
             for _ in range(self.padding):
                 layer.pad_in_place()
 
-        scale = input_data[0].scale ** 2
         output_layers = []
 
-        total = self.output_shape[0] * self.input_shape[0] * self.output_shape[1] * self.output_shape[2]
+        total = self.output_shape[0] * self.output_shape[1] * self.output_shape[2]
         step = total // 10
         progress = 0
 
+        weights = np.transpose(self.weights, (2, 0, 1, 3))
+
         for j_output in range(self.output_shape[0]):
-            map_j = BatchedRealMat.zeros(num_rows=self.output_shape[1],
-                                         num_cols=self.output_shape[2],
-                                         scale=scale,
-                                         scheme=input_data[0].scheme)
+            #layer_mapped = np.zeros((self.output_shape[1], self.output_shape[2]), dtype=object)
+            layer_mapped = self.creator.zero_mat(self.output_shape[1], self.output_shape[2])
 
-            for i_input in range(self.input_shape[0]):
-                kernel = np.squeeze(self.weights[:, :, i_input, j_output])
-                layer = input_data[i_input]
-                layer_mapped = np.zeros((self.output_shape[1], self.output_shape[2]), dtype=object)
+            for r in range(self.output_shape[1]):
+                for c in range(self.output_shape[2]):
+                    r_v = r * self.stride
+                    c_v = c * self.stride
 
-                for r in range(self.output_shape[1]):
-                    for c in range(self.output_shape[2]):
-                        r_v = r * self.stride
-                        c_v = c * self.stride
-                        kernel_area = layer.subregion(r_v, r_v + self.kernel_size[0], c_v, c_v + self.kernel_size[1])
+                    kernel = np.squeeze(weights[:, :, :, j_output])
 
-                        layer_mapped[r][c] = kernel_area.flatten().mult_plain(kernel.flatten().reshape(-1, 1)).element(0, 0)
-                        layer_mapped[r][c].add_raw_in_place(self.biases[j_output])
+                    kernel_area = None
 
-                        progress += 1
-                        if progress % step == 0:
-                            print('Progress: %.2f percent' % (progress / total * 100))
+                    for i_input in range(0, self.input_shape[0]):
+                        layer = input_data[i_input]
+                        kernel_area_layer = layer.subregion(r_v, r_v + self.kernel_size[0], c_v, c_v + self.kernel_size[1])
+                        if i_input == 0:
+                            kernel_area = kernel_area_layer.flatten()
+                        else:
+                            kernel_area.column_concat(kernel_area_layer.flatten())
 
-                layer_mapped = BatchedRealMat.__init_np__(data=layer_mapped,
-                                                          scale=scale,
-                                                          scheme=input_data[0].scheme)
-                map_j.add_in_place(layer_mapped)
+                    val = kernel_area.flatten().mult_plain(kernel.flatten().reshape(-1, 1), self.weight_scale).element(0, 0)
+                    val.add_raw_in_place(self.biases[j_output])
+                    layer_mapped.set_element(r, c, val)
 
-            output_layers.append(map_j)
+                    progress += 1
+                    if progress % step == 0:
+                        print('Progress: %.2f percent' % (progress / total * 100))
+
+            #layer_mapped = self.creator.mat(layer_mapped)
+
+            output_layers.append(layer_mapped)
 
         return output_layers
 
@@ -177,7 +191,7 @@ class DenseLayer(Layer):
 
     def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
         print('-----Applying dense layer-----')
-        mat = input_data[0].mult_plain(self.weights, debug=True)
+        mat = input_data[0].mult_plain(self.weights, self.weight_scale, debug=True)
         mat.add_raw_in_place(raw_mat=self.biases.reshape(1, -1), debug=True)
         return [mat]
 
@@ -200,13 +214,15 @@ class ActivationLayer(Layer):
         if self.mode == 'square':
             for layer in input_data:
                 layer.square_in_place()
+
         return input_data
 
 class Model:
-    def __init__(self):
+    def __init__(self, creator):
         self.layers = []
         self.compiled = False
         self.weights_loaded = False
+        self.creator = creator
 
     def summary(self):
         if not self.compiled or not self.weights_loaded:
@@ -258,6 +274,7 @@ class Model:
         return prev_output
 
     def add(self, layer):
+        layer.creator = self.creator
         self.layers.append(layer)
 
     def compile(self):
@@ -271,19 +288,21 @@ class Model:
         prev_output_shape = input_layer.output_shape
 
         for i in range(1, len(self.layers)):
+            print(prev_output_shape)
             layer = self.layers[i]
             layer.configure_input(input_shape=prev_output_shape)
             prev_output_shape = layer.output_shape
 
         self.compiled = True
 
-    def load_weights(self, weights):
+    def load_weights(self, weights, scale: int):
         self.weights_loaded = True
 
         if len(weights) != len(self.layers):
             raise Exception('Weights error: does not match number of layers in model.')
 
         for i in range(0, len(self.layers)):
+            self.layers[i].set_weight_scale(scale)
             self.layers[i].load_weights(weights=weights[i][0], extra=weights[i][1])
 
     def get_input_shape(self):
@@ -307,107 +326,59 @@ def accuracy(a, b):
     return count / len(a)
 
 if __name__ == '__main__':
-    from interface import get_scheme, Creator
+    #scheme = get_bfv_scheme(512 * 16 * 1, [20,21,22], 16, 16)
 
-    # scheme = get_scheme()
-    # creator = Creator(scheme, scale=2048)
-    # scheme.summary()
-    # m = np.array([[
-    #     [.1,.2,-.3],
-    #     [.4,.55,.6]
-    # ]])
-    # n = np.array([
-    #     [-.14,.25,.53],
-    #     [.44,-.5,.66],
-    #     [.44, -.5,.166]
-    # ])
+    scheme = get_ckks_scheme(512 * 16 * 2)
+
+    creator = Creator(scheme)
+    print('------Summary of scheme-------')
+    scheme.summary()
+
+    # mat_a = np.random.uniform(-1, 1, (3,3))
+    # myfunc_vec = np.vectorize(lambda x: x**32)
+    # mat_a_pow_5 = myfunc_vec(mat_a)
     #
-    # m_enc = creator.encrypt(m)
+    # mat_a_enc = creator.encrypt(mat=np.array([mat_a]))
     #
-    # z = m_enc.mult_plain(n)
-    # z.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
     #
-    # #m_enc.square_in_place()
-    # print(creator.debug(z, 1))
-    # z.noise()
     #
-    # print((np.matmul(m, n) ** 2) ** 2)
+    # mat_b = np.random.uniform(-1, 1, (3, 3))
+    #
+    # mat_c_enc = mat_a_enc.mult_plain(mat_b)
+    #
+    # mat_c_dec = creator.debug(mat_c_enc, 1)
+    #
+    # print(np.matmul(mat_a_pow_5, mat_b))
+    # print(mat_c_dec)
+    #
     # exit(0)
 
-
-    model = Model()
+    model = Model(creator)
     model.add(InputLayer(input_shape=(1, 28, 28)))
-    model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=5))
+    model.add(ConvLayer(kernel_size=(5, 5), stride=4, padding=0, num_maps=5))
+    model.add(ActivationLayer(mode='identity'))
+    model.add(ConvLayer(kernel_size=(5, 5), stride=4, padding=0, num_maps=50))
     model.add(ActivationLayer(mode='square'))
     model.add(Flatten())
     model.add(DenseLayer(output_length=10))
-    model.add(DenseLayer(output_length=10))
-    #model.add(ActivationLayer(mode='square'))
-    #model.add(DenseLayer(output_length=10))
 
-    weights = np.load('weights.npy', allow_pickle=True)
+    weights = np.load('data/weights.npy', allow_pickle=True)
 
     model.compile()
-    model.load_weights(weights)
+    model.load_weights(weights, scale=16)
     model.summary()
 
-    mnist_train_features = np.load('mnist_test_features.npy')[:2000]
+    mnist_train_features = np.load('data/mnist_test_features.npy')[:2000]
     mnist_train_features = mnist_train_features.squeeze()
 
-    preds_base = np.load('model_preds.npy')[:2000]
-    outputs_base = np.load('model_outputs.npy')[:2000]
+    preds_base = np.load('data/model_preds.npy')[:2000]
+    outputs_base = np.load('data/model_outputs.npy')[:2000]
 
-    # preds_new = []
-    # outputs_new = []
-    #
-    #
-    # def conv2d(image, w, w2):
-    #     if w.shape != (3, 3, 1, 5):
-    #         raise Exception('a')
-    #
-    #     result = []
-    #
-    #     for k in range(5):
-    #         x = 0
-    #         mat = np.zeros((13, 13))
-    #         while x <= 24:
-    #             y = 0
-    #             while y <= 24:
-    #                 a = image[y:y+3,x:x+3].flatten()
-    #                 b = w[:, :, 0, k].flatten()
-    #                 mat[y // 2][x // 2] = np.dot(a, b) + w2[k]
-    #                 y += 2
-    #             x += 2
-    #         result.append(mat)
-    #
-    #     return np.array(result)
-    #
-    # for i in range(2000):
-    #     image = mnist_train_features[i]
-    #     conv_result = conv2d(image, weights[1][0], weights[1][1])
-    #
-    #     flat = conv_result.reshape(1, -1)
-    #     flat = flat ** 2
-    #
-    #     x = np.matmul(flat, weights[4][0])
-    #
-    #     x = x.flatten()
-    #
-    #     x += weights[4][1]
-    #
-    #     outputs_new.append(list(x))
-    #     preds_new.append(np.argmax(x))
-    #
-    #
-    # preds_new = np.array(preds_new)
-    #
-    # print(outputs_new[543])
-    # print(outputs_base[543])
-
-    scheme = get_scheme(512 * 16 * 1, [17,18,20,21,22,23,24])
-    creator = Creator(scheme, scale=16)
-    print('------Summary of scheme-------')
-    scheme.summary()
 
     print('Encrypting %s items' % len(mnist_train_features))
     encrypted = creator.encrypt(mat=mnist_train_features)

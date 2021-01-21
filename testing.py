@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import pandas as pd
 
-from interface import *
+from schemes import *
 import time
 
 def test_basic():
@@ -34,7 +34,7 @@ def test_basic():
     # print('Budget exhausted after %s iterations' %i)
 
     real_enc = EncryptedReal.__create__(0.4456, 1024)
-    real_enc = real_enc.multiply_plain(0.543)
+    real_enc = real_enc.multiply_raw(0.543)
     reveal_ciphertext(real_enc.int_enc.ciphertext)
 
  

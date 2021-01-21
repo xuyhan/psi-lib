@@ -1,11 +1,27 @@
+import math
 from typing import List
 
 from seal import *
 from seal_helper import *
 import numpy as np
 from crt import crt
+from multiprocessing import Pool
 
-class Scheme:
+
+class CiphertextCRT:
+    def __init__(self, ciphers: List[Ciphertext]):
+        self.ciphers = ciphers
+
+    def get(self, i):
+        return self.ciphers[i]
+
+
+class SchemeBase:
+    def evaluate_ciphertext(self, ciphertext):
+        pass
+
+
+class Scheme(SchemeBase):
     def summary(self):
         pass
 
@@ -27,25 +43,25 @@ class Scheme:
     def add(self, cipher_a: Ciphertext, cipher_b: Ciphertext) -> Ciphertext:
         pass
 
-    def add_int(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+    def add_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
         pass
 
     def add_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         pass
 
-    def add_int_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+    def add_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
         pass
 
     def multiply(self, cipher_a: Ciphertext, cipher_b: Ciphertext) -> Ciphertext:
         pass
 
-    def multiply_int(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+    def multiply_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
         pass
 
     def multiply_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         pass
 
-    def multiply_int_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+    def multiply_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
         pass
 
     def square(self, cipher_a: Ciphertext) -> Ciphertext:
@@ -63,74 +79,166 @@ class Scheme:
     def relinearise(self, cipher: Ciphertext):
         pass
 
-    def evaluate_ciphertext(self, ciphertext):
-        pass
 
+class SchemeCKKS(Scheme):
+    def __init__(self, poly_modulus_degree):
+        parms = EncryptionParameters(scheme_type.CKKS)
+        parms.set_poly_modulus_degree(poly_modulus_degree)
+        parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, [60,40,40,40,40,40,40,60]))
 
-class CiphertextCRT:
-    def __init__(self, ciphers: List[Ciphertext]):
-        self.ciphers = ciphers
+        context = SEALContext.Create(parms)
 
-    def get(self, i):
-        return self.ciphers[i]
+        keygen = KeyGenerator(context)
 
-class CRTScheme:
+        public_key = keygen.public_key()
+        secret_key = keygen.secret_key()
+
+        self.encryptor = Encryptor(context, public_key)
+        self.evaluator = Evaluator(context)
+        self.decryptor = Decryptor(context, secret_key)
+        self.encoder = CKKSEncoder(context)
+
+        self.relin_keys = keygen.relin_keys()
+        self.gal_keys = keygen.galois_keys()
+
+        self.default_scale = 2.0 ** 40
+
+    def mod_switch(self, ciphertext_a: Ciphertext, to_switch):
+        self.evaluator.mod_switch_to_inplace(to_switch, ciphertext_a.parms_id())
+
     def summary(self):
-        pass
+        print('Slot count: %s' % self.slot_count())
 
-    def get_plaintext_modulus(self) -> int:
-        pass
+    def _batch_encode(self, v: np.ndarray, debug=False) -> Plaintext:
+        matrix = [0] * self.encoder.slot_count()
+        matrix[:len(v)] = v
+        matrix = DoubleVector(matrix)
 
-    def encrypt(self, v: np.ndarray) -> CiphertextCRT:
-        pass
+        plaintext = Plaintext()
+        self.encoder.encode(matrix, self.default_scale, plaintext)
 
-    def encrypt_special(self, v: np.ndarray) -> CiphertextCRT:
-        pass
+        return plaintext
 
-    def zero(self) -> CiphertextCRT:
-        pass
+    def _batch_decode(self, plain: Plaintext) -> DoubleVector:
+        raw = DoubleVector()
+        self.encoder.decode(plain, raw)
+        return raw
 
-    def add(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT) -> CiphertextCRT:
-        pass
+    def encrypt(self, v: np.ndarray) -> Ciphertext:
+        ciphertext = Ciphertext()
+        self.encryptor.encrypt(self._batch_encode(v), ciphertext)
+        return ciphertext
 
-    def add_int(self, cipher_a: CiphertextCRT, v: np.ndarray) -> CiphertextCRT:
-        pass
+    def decrypt(self, cipher: Ciphertext) -> Plaintext:
+        plaintext = Plaintext()
+        self.decryptor.decrypt(cipher, plaintext)
+        return plaintext
 
-    def add_in_place(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT):
-        pass
+    def zero(self):
+        return self.encrypt(np.array([0]))
 
-    def add_int_in_place(self, cipher_a: CiphertextCRT, v: np.ndarray):
-        pass
+    def add(self, cipher_a: Ciphertext, cipher_b: Ciphertext) -> Ciphertext:
+        self.mod_switch(cipher_a, cipher_b)
 
-    def multiply(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT) -> CiphertextCRT:
-        pass
+        cipher_new = Ciphertext()
+        self.evaluator.add(cipher_a, cipher_b, cipher_new)
 
-    def multiply_int(self, cipher_a: CiphertextCRT, v: np.ndarray) -> CiphertextCRT:
-        pass
+        return cipher_new
 
-    def multiply_in_place(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT):
-        pass
+    def add_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
+        self.mod_switch(cipher_a, cipher_b)
 
-    def multiply_int_in_place(self, cipher_a: CiphertextCRT, v: np.ndarray):
-        pass
+        self.evaluator.add_inplace(cipher_a, cipher_b)
 
-    def square(self, cipher_a: CiphertextCRT) -> CiphertextCRT:
-        pass
+    def add_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+        plaintext = self._batch_encode(v)
+        self.mod_switch(cipher_a, plaintext)
 
-    def square_in_place(self, cipher_a: CiphertextCRT):
-        pass
+        cipher_new = Ciphertext()
+        self.evaluator.add(cipher_a, plaintext, cipher_new)
+
+        return cipher_new
+
+    def add_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+        plaintext = self._batch_encode(v)
+        self.mod_switch(cipher_a, plaintext)
+
+        self.evaluator.add_plain_inplace(cipher_a, plaintext)
+
+    def multiply(self, cipher_a: Ciphertext, cipher_b: Ciphertext) -> Ciphertext:
+        self.mod_switch(cipher_a, cipher_b)
+
+        cipher_new = Ciphertext()
+        self.evaluator.multiply(cipher_a, cipher_b, cipher_new)
+
+        self.evaluator.rescale_to_next_inplace(cipher_new)
+        cipher_new.scale(self.default_scale)
+
+        return cipher_new
+
+    def multiply_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
+        self.mod_switch(cipher_a, cipher_b)
+
+        self.evaluator.multiply_inplace(cipher_a, cipher_b)
+
+        self.evaluator.rescale_to_next_inplace(cipher_a)
+        cipher_a.scale(self.default_scale)
+
+    def multiply_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+        if np.sum(v) == 0:
+            return self.zero()
+
+        plaintext = self._batch_encode(v)
+        self.mod_switch(cipher_a, plaintext)
+
+        cipher_new = Ciphertext()
+
+        self.evaluator.multiply_plain(cipher_a, plaintext, cipher_new)
+
+        self.evaluator.rescale_to_next_inplace(cipher_new)
+        cipher_new.scale(self.default_scale)
+
+        return cipher_new
+
+    def multiply_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+        plaintext = self._batch_encode(v)
+        self.mod_switch(cipher_a, plaintext)
+
+        self.evaluator.rescale_to_next_inplace(cipher_a)
+        self.evaluator.multiply_plain_inplace(cipher_a, plaintext)
+
+        cipher_a.scale(self.default_scale)
+
+    def square(self, cipher_a: Ciphertext) -> Ciphertext:
+        cipher_new = Ciphertext()
+        self.evaluator.square(cipher_a, cipher_new)
+
+        self.evaluator.rescale_to_next_inplace(cipher_new)
+        cipher_new.scale(self.default_scale)
+
+        return cipher_new
+
+    def square_in_place(self, cipher_a: Ciphertext):
+        print(cipher_a.scale())
+
+        self.evaluator.square_inplace(cipher_a)
+        self.evaluator.relinearize_inplace(cipher_a, self.relin_keys)
+        self.evaluator.rescale_to_next_inplace(cipher_a)
+
+        cipher_a.scale(self.default_scale)
+
+        print("%.0f" % math.log(cipher_a.scale(), 2) + " bits")
+
 
     def slot_count(self):
-        pass
+        return self.encoder.slot_count()
 
-    def rotate_in_place(self, cipher: CiphertextCRT, n: int):
-        pass
+    def rotate_in_place(self, cipher: Ciphertext, n: int):
+        self.evaluator.rotate_vector_inplace(cipher, n, self.gal_keys)
 
-    def relinearise(self, cipher: CiphertextCRT):
-        pass
+    def relinearise(self, cipher: Ciphertext):
+        self.evaluator.relinearize_inplace(cipher, self.relin_keys)
 
-    def evaluate_ciphertext(self, ciphertext: CiphertextCRT):
-        pass
 
 class SchemeBFV(Scheme):
     def __init__(self, poly_modulus_degree, plain_modulus_bits):
@@ -148,8 +256,8 @@ class SchemeBFV(Scheme):
         keygen = KeyGenerator(context)
 
         self.plaintext_modulus = plain_modulus
-        self.encryptor = Encryptor(context, keygen.public_key())
         self.decryptor = Decryptor(context, keygen.secret_key())
+        self.encryptor = Encryptor(context, keygen.public_key())
         self.encoder = BatchEncoder(context)
         self.evaluator = Evaluator(context)
         self.relin_keys = keygen.relin_keys()
@@ -192,7 +300,7 @@ class SchemeBFV(Scheme):
         self.evaluator.add(cipher_a, cipher_b, cipher_new)
         return cipher_new
 
-    def add_int(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+    def add_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
         cipher_new = Ciphertext()
         self.evaluator.add(cipher_a, self._batch_encode(v), cipher_new)
         return cipher_new
@@ -200,7 +308,7 @@ class SchemeBFV(Scheme):
     def add_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         self.evaluator.add_inplace(cipher_a, cipher_b)
 
-    def add_int_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+    def add_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
         self.evaluator.add_plain_inplace(cipher_a, self._batch_encode(v))
 
     def multiply(self, cipher_a: Ciphertext, cipher_b: Ciphertext) -> Ciphertext:
@@ -208,7 +316,7 @@ class SchemeBFV(Scheme):
         self.evaluator.multiply(cipher_a, cipher_b, cipher_new)
         return cipher_new
 
-    def multiply_int(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
+    def multiply_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
         if np.sum(v) == 0:
             return self.zero()
 
@@ -219,7 +327,7 @@ class SchemeBFV(Scheme):
     def multiply_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         self.evaluator.multiply_inplace(cipher_a, cipher_b)
 
-    def multiply_int_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
+    def multiply_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
         self.evaluator.multiply_plain_inplace(cipher_a, self._batch_encode(v))
 
     def square(self, cipher_a: Ciphertext) -> Ciphertext:
@@ -250,18 +358,25 @@ class SchemeBFV(Scheme):
         return budget
 
 
-class SchemeBFV_CRT(CRTScheme):
-    def __init__(self, poly_modulus_degree, qs):
-        self.bfv_schemes = []
+class CRTScheme(SchemeBase):
+    def __init__(self, poly_modulus_degree, qs, default_scale, default_weight_scale):
+        self.schemes = []
+        self.n = None
+        self.default_scale = None
+        self.default_weight_scale = None
+
         for i in range(len(qs)):
-            scheme = SchemeBFV(poly_modulus_degree, qs[i])
-            self.bfv_schemes.append(scheme)
-        self.n = len(self.bfv_schemes)
+            self.schemes.append(SchemeBFV(poly_modulus_degree, qs[i]))
+
+        self.n = len(self.schemes)
+
+        self.default_scale = default_scale
+        self.default_weight_scale = default_weight_scale
 
     def get_plaintext_modulus(self) -> int:
-        n = self.bfv_schemes[0].plaintext_modulus
+        n = self.schemes[0].plaintext_modulus
         for i in range(1, self.n):
-            n *= self.bfv_schemes[i].plaintext_modulus
+            n *= self.schemes[i].plaintext_modulus
         return n
 
     def summary(self):
@@ -269,574 +384,80 @@ class SchemeBFV_CRT(CRTScheme):
         print('Plaintext modulus: %s ' % self.get_plaintext_modulus())
 
     def encrypt(self, v: np.ndarray) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].encrypt(v) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].encrypt(v) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def zero(self) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].zero() for i in range(self.n)]
+        ciphers_new = [self.schemes[i].zero() for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def add(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].add(cipher_a.get(i), cipher_b.get(i)) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].add(cipher_a.get(i), cipher_b.get(i)) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def add_int(self, cipher_a: CiphertextCRT, v: np.ndarray) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].add_int(cipher_a.get(i), v) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].add_raw(cipher_a.get(i), v) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def add_in_place(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT):
         for i in range(self.n):
-            self.bfv_schemes[i].add_in_place(cipher_a.get(i), cipher_b.get(i))
+            self.schemes[i].add_in_place(cipher_a.get(i), cipher_b.get(i))
 
     def add_int_in_place(self, cipher_a: CiphertextCRT, v: np.ndarray):
         for i in range(self.n):
-            self.bfv_schemes[i].add_int_in_place(cipher_a.get(i), v)
+            self.schemes[i].add_raw_in_place(cipher_a.get(i), v)
 
     def multiply(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].multiply(cipher_a.get(i), cipher_b.get(i)) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].multiply(cipher_a.get(i), cipher_b.get(i)) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def multiply_int(self, cipher_a: CiphertextCRT, v: np.ndarray) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].multiply_int(cipher_a.get(i), v) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].multiply_raw(cipher_a.get(i), v) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def multiply_in_place(self, cipher_a: CiphertextCRT, cipher_b: CiphertextCRT):
         for i in range(self.n):
-            self.bfv_schemes[i].multiply_in_place(cipher_a.get(i), cipher_b.get(i))
+            self.schemes[i].multiply_in_place(cipher_a.get(i), cipher_b.get(i))
 
     def multiply_int_in_place(self, cipher_a: CiphertextCRT, v: np.ndarray):
         for i in range(self.n):
-            self.bfv_schemes[i].multiply_int_in_place(cipher_a.get(i), v)
+            self.schemes[i].multiply_raw_in_place(cipher_a.get(i), v)
 
     def square(self, cipher_a: CiphertextCRT) -> CiphertextCRT:
-        ciphers_new = [self.bfv_schemes[i].square(cipher_a.get(i)) for i in range(self.n)]
+        ciphers_new = [self.schemes[i].square(cipher_a.get(i)) for i in range(self.n)]
         return CiphertextCRT(ciphers_new)
 
     def square_in_place(self, cipher_a: CiphertextCRT):
         for i in range(self.n):
-            self.bfv_schemes[i].square_in_place(cipher_a.get(i))
+            self.schemes[i].square_in_place(cipher_a.get(i))
 
     def slot_count(self):
-        return self.bfv_schemes[0].slot_count()
+        return self.schemes[0].slot_count()
 
     def rotate_in_place(self, cipher: CiphertextCRT, n: int):
         for i in range(self.n):
-            self.bfv_schemes[i].rotate_in_place(cipher.get(i), n)
+            self.schemes[i].rotate_in_place(cipher.get(i), n)
 
     def relinearise(self, cipher: CiphertextCRT):
         for i in range(self.n):
-            self.bfv_schemes[i].relinearise(cipher.get(i))
+            self.schemes[i].relinearise(cipher.get(i))
 
     def evaluate_ciphertext(self, ciphertext: CiphertextCRT):
         for i in range(self.n):
-            self.bfv_schemes[i].evaluate_ciphertext(ciphertext.get(i))
+            self.schemes[i].evaluate_ciphertext(ciphertext.get(i))
 
 
-class BatchedInteger:
-    def __init__(self, v, scheme: SchemeBFV_CRT):
-        self.scheme = scheme
-        self.length = 5000
-
-        if isinstance(v, CiphertextCRT):
-            self.ciphertext = v
-        else:
-            self.ciphertext = scheme.encrypt(v)
-
-        self.num_slots = scheme.bfv_schemes[0].slot_count()
-
-    def add(self, batched_int):
-        cipher_new = self.scheme.add(self.ciphertext, batched_int.ciphertext)
-        return BatchedInteger(cipher_new, self.scheme)
-
-    def add_in_place(self, batched_int):
-        self.scheme.add_in_place(self.ciphertext, batched_int.ciphertext)
-
-    def add_int_in_place(self, n: int):
-        self.scheme.add_int_in_place(self.ciphertext, np.array([n] * self.length))
-
-    def multiply(self, batched_int):
-        cipher_new = self.scheme.multiply(self.ciphertext, batched_int.ciphertext)
-        return BatchedInteger(cipher_new, self.scheme)
-
-    def multiply_int(self, n: int):
-        cipher_new = self.scheme.multiply_int(self.ciphertext, np.array([n] * self.length))
-        return BatchedInteger(cipher_new, self.scheme)
-
-    def multiply_in_place(self, batched_int):
-        self.scheme.multiply_in_place(self.ciphertext, batched_int.ciphertext)
-
-    def multiply_int_in_place(self, n: int):
-        self.scheme.multiply_int_in_place(self.ciphertext, np.array([n] * self.length))
-
-    def square(self):
-        cipher_new = self.scheme.square(self.ciphertext)
-        return BatchedInteger(cipher_new, self.scheme)
-
-    def square_in_place(self):
-        self.scheme.square_in_place(self.ciphertext)
-
-    def sum(self):
-        total = self.scheme.encrypt(np.array([0]))
-
-        for i in range(self.length):
-            self.scheme.rotate_in_place(total, 1)
-            self.scheme.add_in_place(total, self.ciphertext)
-
-        self.scheme.rotate_in_place(self.ciphertext, self.scheme.slot_count() // 2 - 2 * self.length)
-
-        for i in range(self.length):
-            self.scheme.rotate_in_place(self.ciphertext, 1)
-            self.scheme.add_in_place(total, self.ciphertext)
-
-        return BatchedInteger(total, self.scheme)
-
-    def relinearise(self):
-        self.scheme.relinearise(self.ciphertext)
-
-    def debug(self, length):
-        result = []
-
-        for i in range(self.scheme.n):
-            scheme = self.scheme.bfv_schemes[i]
-            plaintext = scheme.decrypt(self.ciphertext.get(i))
-            raw = scheme._batch_decode(plaintext)
-
-            decoded = []
-
-            for j in range(length):
-                decoded.append(raw[j])
-
-            result.append(decoded)
-
-        result_crt = []
-
-        for j in range(length):
-            moduli = [result[i][j] for i in range(self.scheme.n)]
-            #print(moduli)
-
-            bases = [self.scheme.bfv_schemes[i].plaintext_modulus for i in range(self.scheme.n)]
-            result_crt.append(crt(p=moduli, q=bases))
-
-        #print(result_crt)
-
-        t = self.scheme.get_plaintext_modulus()
-
-        for i in range(len(result_crt)):
-            result_crt[i] = -(t - result_crt[i]) if result_crt[i] > (t // 2) else result_crt[i]
-            #print(result_crt[i])
-
-        return result_crt
-
-class BatchedReal(BatchedInteger):
-    def __init__(self, v, scale: float, scheme: SchemeBFV_CRT):
-        self.scale = scale
-        arg = v
-        if isinstance(arg, np.ndarray):
-            arg = (arg * scale).astype(int)
-        super().__init__(arg, scheme)
-
-    @staticmethod
-    def zero(scale: float, scheme: SchemeBFV_CRT):
-        return BatchedReal(np.array([0]), scale, scheme)
-
-    def add(self, batched_real):
-        if self.scale != batched_real.scale:
-            raise Exception('scale mismatch')
-
-        return BatchedReal(super().add(batched_real).ciphertext,
-                           self.scale,
-                           self.scheme)
-
-    def add_raw_in_place(self, raw: float):
-        raw_int = int(raw * self.scale)
-        super().add_int_in_place(n=raw_int)
-
-    def add_in_place(self, batched_real):
-        if self.scale != batched_real.scale:
-            raise Exception('Scale mismatch')
-        super().add_in_place(batched_real)
-
-    def multiply(self, batched_real):
-        return BatchedReal(super().multiply(batched_real).ciphertext,
-                           self.scale * batched_real.scale,
-                           self.scheme)
-
-    def multiply_plain(self, real: np.ndarray):
-        real = (real * self.scale).astype(int)
-        return BatchedReal(super().multiply_int(real).ciphertext,
-                           self.scale ** 2,
-                           self.scheme)
-
-    def multiply_in_place(self, batched_real):
-        super().multiply_in_place(batched_real)
-        self.scale *= batched_real.scale
-
-    def square(self):
-        return BatchedReal(super().square().ciphertext,
-                           self.scale ** 2,
-                           self.scheme)
-
-    def square_in_place(self):
-        super().square_in_place()
-        self.scale = self.scale ** 2
-
-    def sum(self):
-        return BatchedReal(super().sum().ciphertext,
-                           self.scale,
-                           self.scheme)
-
-    def debug(self, length: int):
-        result = super().debug(length)
-        for i in range(len(result)):
-            result[i] /= self.scale
-        return result
-
-
-class BatchedRealVec:
-    def __init__(self, data: List[BatchedReal], scale: float, scheme: SchemeBFV_CRT):
-        self.data = data
-        self.scale = scale
-        self.scheme = scheme
-
-    def len(self):
-        return len(self.data)
-
-    @staticmethod
-    def zero(length: int, scale: float, scheme: SchemeBFV_CRT):
-        return BatchedRealVec([BatchedReal.zero(scale, scheme) for _ in range(length)],
-                              scale,
-                              scheme)
-
-    def relinearise(self):
-        for batched_real in self.data:
-            batched_real.relinearise()
-
-    def set_element(self, i, batched_real: BatchedReal):
-        self.data[i] = batched_real
-
-    def element(self, i: int) -> BatchedReal:
-        return self.data[i]
-
-    def subregion(self, i, j):
-        return BatchedRealVec(self.data[i: j], self.scale, self.scheme)
-
-    def append(self, batched_real: BatchedReal):
-        self.data.append(batched_real)
-
-    def prepend(self, batched_real: BatchedReal):
-        self.data = [batched_real] + self.data
-
-    def extend(self, batched_real_vec):
-        self.data.extend(batched_real_vec.data)
-
-    def add(self, batched_real_vec):
-        self.__vec_enc_check(batched_real_vec)
-
-        new_data = []
-        for i in range(len(self.data)):
-            new_data.append(self.data[i].add(batched_real_vec.data[i]))
-
-        return BatchedRealVec(np.array(new_data), self.scale, self.scheme)
-
-    def add_raw_in_place(self, vec_raw: np.ndarray):
-        self.__vec_raw_check(vec_raw)
-
-        for i in range(len(self.data)):
-            self.data[i].add_raw_in_place(vec_raw[i])
-
-    def add_in_place(self, batched_real_vec):
-        self.__vec_enc_check(batched_real_vec)
-
-        for i in range(len(self.data)):
-            self.data[i].add_in_place(batched_real_vec.data[i])
-
-    def multiply_element_wise(self, batched_real_vec):
-        self.__vec_enc_check(batched_real_vec)
-
-        new_data = [self.data[i].multiply(batched_real_vec.data[i]) for i in range(len(self.data))]
-
-        return BatchedRealVec(new_data, self.scale * batched_real_vec.scale, self.scheme)
-
-    def multiply_element_wise_plain(self, vec_raw):
-        self.__vec_raw_check(vec_raw)
-        new_data = [self.data[i].multiply_plain(vec_raw[i]) for i in range(len(self.data))]
-        return BatchedRealVec(new_data, self.scale ** 2, self.scheme)
-
-    def square(self):
-        new_data = np.array([self.data[i].square() for i in range(len(self.data))])
-        return BatchedRealVec(new_data, self.scale ** 2, self.scheme)
-
-    def square_in_place(self):
-        self.scale = self.scale ** 2
-        for batched_real in self.data:
-            batched_real.square_in_place()
-
-    def get_sum(self):
-        if self.len() == 1:
-            return self.data[0]
-
-        total = self.data[0].add(self.data[1])
-        for i in range(2, self.len()):
-            total.add_in_place(self.data[i])
-
-        return total
-
-    def dot(self, batched_real_vec):
-        self.__vec_enc_check(batched_real_vec)
-
-        return self.multiply_element_wise(batched_real_vec).get_sum()
-
-    def dot_plain(self, vec_raw):
-        self.__vec_raw_check(vec_raw)
-
-        return self.multiply_element_wise_plain(vec_raw).get_sum()
-
-    def __vec_enc_check(self, batched_real_vec):
-        if self.scale != batched_real_vec.scale:
-            raise Exception("Scale mismatch: %s != %s" % (self.scale, batched_real_vec.scale))
-        if self.len() != batched_real_vec.len():
-            raise Exception("Length mismatch: %s != %s" % (self.data.len(), batched_real_vec.data.len()))
-
-    def __vec_raw_check(self, vec_raw):
-        if self.len() != vec_raw.shape[0]:
-            raise Exception("Length mismatch: %s != %s" % (len(self.data), len(vec_raw)))
-
-
-class BatchedRealMat:
-    def __init__(self, data: List[BatchedRealVec], scale: float, scheme: SchemeBFV_CRT):
-        self.data = data
-        self.scale = scale
-        self.scheme = scheme
-
-    @staticmethod
-    def __init_np__(data: np.ndarray, scale: float, scheme: SchemeBFV_CRT):
-        data_updated = []
-        for row in data:
-            data_updated.append(BatchedRealVec(row, scale, scheme))
-        return BatchedRealMat(data_updated, scale, scheme)
-
-    def relinearise(self):
-        for row in self.data:
-            row.relinearise()
-
-    @staticmethod
-    def zeros(num_rows, num_cols, scale, scheme):
-        data = []
-        for _ in range(num_rows):
-            data.append(BatchedRealVec.zero(num_cols, scale, scheme))
-        return BatchedRealMat(data, scale, scheme)
-
-    def shape(self):
-        return len(self.data), self.data[0].len()
-
-    def set_element(self, i: int, j: int, batched_real: BatchedReal):
-        self.data[i].set_element(j, batched_real)
-
-    def element(self, i: int, j: int) -> BatchedReal:
-        return self.data[i].element(j)
-
-    def row(self, i: int) -> BatchedRealVec:
-        return self.data[i]
-
-    def col(self, i: int) -> BatchedRealVec:
-        vec_data = np.array([self.element(j, i) for j in range(self.shape()[0])])
-        return BatchedRealVec(vec_data, self.scale, self.scheme)
-
-    def subregion(self, r_start, r_end, c_start, c_end):
-        data_subregion = []
-        for vec in self.data[r_start: r_end]:
-            data_subregion.append(vec.subregion(c_start, c_end))
-        return BatchedRealMat(data_subregion, self.scale, self.scheme)
-
-    def add(self, real_mat):
-        if self.shape() != real_mat.shape():
-            raise Exception("Error: cannot add matrices with different shapes.")
-
-        new_data = []
-        for i in range(self.shape()[0]):
-            new_data.append(self.data[i].add(real_mat.data[i]))
-
-        return BatchedRealMat(new_data, self.scale, self.scheme)
-
-    def add_in_place(self, real_mat):
-        if self.shape() != real_mat.shape():
-            raise Exception("Error: cannot add matrices with different shapes.")
-
-        for i in range(self.shape()[0]):
-            self.data[i].add_in_place(real_mat.data[i])
-
-    def add_raw_in_place(self, raw_mat: np.ndarray, debug=False):
-        if debug:
-            print('Adding biases')
-
-        if self.shape() != raw_mat.shape:
-            raise Exception('Shape mismatch in matrix add: %s != %s' % (self.shape(), raw_mat.shape))
-
-        for i in range(self.shape()[0]):
-            self.row(i).add_raw_in_place(raw_mat[i])
-
-    def flatten(self):
-        result = []
-        for i in range(self.shape()[0]):
-            result.append(self.row(i).data)
-        result = np.array(result)
-        result = result.reshape(1, -1)[0]
-        vec = BatchedRealVec(list(result), self.scale, self.scheme)
-        return BatchedRealMat([vec], self.scale, self.scheme)
-
-    def square_in_place(self):
-        self.scale = self.scale ** 2
-        for vec in self.data:
-            vec.square_in_place()
-
-    def mult(self, real_mat):
-        if self.shape()[1] != real_mat.shape()[0]:
-            raise Exception("Error cannot multiply %s matrix with %s matrix" %(self.shape, real_mat.shape))
-        data_new = []
-        scale_new = None
-        for i in range(self.shape()[0]):
-            row_new = [None for _ in range(real_mat.shape()[1])]
-            for j in range(real_mat.shape()[1]):
-                row_a = self.row(i)
-                col_b = real_mat.col(j)
-                row_new[j] = row_a.dot(col_b)
-                if scale_new is not None and scale_new != row_new[j].scale:
-                    raise Exception("Scale error in matrix multiply")
-                scale_new = row_new[j].scale
-            data_new.append(BatchedRealVec(row_new, scale_new, self.scheme))
-        return BatchedRealMat(data_new, scale_new, self.scheme)
-
-    def mult_plain(self, raw_mat: np.ndarray, debug=False):
-        if self.shape()[1] != raw_mat.shape[0]:
-            raise Exception("Error cannot multiply %s matrix with %s matrix" %(self.shape(), raw_mat.shape))
-        data_new = []
-        shape_a = self.shape()
-        shape_b = raw_mat.shape
-
-        if debug:
-            print('Starting matrix multiplication...')
-
-            total_steps = shape_a[0] * shape_b[1]
-            progress_step = total_steps // 10
-
-        for i in range(shape_a[0]):
-            row_new = [None for _ in range(shape_b[1])]
-            for j in range(shape_b[1]):
-                row_a = self.row(i)
-                col_b = raw_mat[:, j]
-                row_new[j] = row_a.dot_plain(col_b)
-
-                progress = i * shape_a[0] + j
-                if debug and progress % progress_step == 0:
-                    print('Progress: %.2f' % (progress / total_steps))
-
-            data_new.append(BatchedRealVec(row_new, self.scale ** 2, self.scheme))
-
-        return BatchedRealMat(data_new, self.scale ** 2, self.scheme)
-
-    def left_mult_plain(self, raw_mat: np.ndarray):
-        if self.shape()[0] != raw_mat.shape[1]:
-            raise Exception("Error cannot multiply %s matrix with %s matrix" %(raw_mat.shape, self.shape()))
-        data_new = []
-        shape_a = raw_mat.shape
-        shape_b = self.shape()
-
-        for i in range(shape_a[0]):
-            row_new = [None for _ in range(shape_b[1])]
-            for j in range(shape_b[1]):
-                row_a = raw_mat[i]
-                col_b = self.col(j)
-                row_new[j] = col_b.dot_plain(row_a)
-
-            data_new.append(BatchedRealVec(row_new, self.scale ** 2, self.scheme))
-        return BatchedRealMat(data_new, self.scale ** 2, self.scheme)
-
-    def pad_in_place(self):
-        old_h, old_w = self.shape()
-        for vec in self.data:
-            vec.prepend(BatchedReal.zero(scale=self.scale, scheme=self.scheme))
-            vec.append(BatchedReal.zero(scale=self.scale, scheme=self.scheme))
-        self.data = [BatchedRealVec.zero(old_w + 2, self.scale, scheme=self.scheme)] + self.data
-        self.data.append(BatchedRealVec.zero(old_w + 2, self.scale, scheme=self.scheme))
-
-    def transpose(self):
-        data = []
-        for j in range(self.shape()[1]):
-            row_data = []
-            for i in range(self.shape()[0]):
-                row_data.append(self.row(i).element(j))
-            data.append(BatchedRealVec(data=row_data, scale=self.scale, scheme=self.scheme))
-        return BatchedRealMat(data, self.scale, scheme=self.scheme)
-
-    def column_concat(self, batched_real_mat):
-        if self.shape()[0] != batched_real_mat.shape()[0]:
-            raise Exception('Row mismatch: %s != %s' % (self.shape()[0], batched_real_mat.shape()[0]))
-
-        for i in range(self.shape()[0]):
-            self.row(i).extend(batched_real_mat.row(i))
-
-    def noise(self):
-        self.scheme.evaluate_ciphertext(self.element(0, 0).ciphertext)
-
-
-class Creator:
-    def __init__(self, scheme, scale=4096):
-        self.scheme = scheme
-        self.scale = scale
-
-    def encrypt(self, mat: np.ndarray) -> BatchedRealMat:
-        if len(mat.shape) != 3:
-            raise Exception('Expected input to have three dimensions. Received: %s' % len(mat.shape))
-
-        mat_data = []
-
-        for i in range(mat.shape[1]):
-            row_data = []
-            for j in range(mat.shape[2]):
-                pixel_data = mat[:, i, j].reshape(1, -1)[0]
-                batched_real = BatchedReal(np.array(pixel_data), self.scale, self.scheme)
-                row_data.append(batched_real)
-            mat_data.append(BatchedRealVec(row_data, self.scale, self.scheme))
-
-        return BatchedRealMat(mat_data, self.scale, self.scheme)
-
-    def debug(self, batched_real_mat: BatchedRealMat, length: int) -> np.ndarray:
-        num_rows, num_cols = batched_real_mat.shape()
-
-        result = []
-
-        for i in range(num_rows):
-            row = []
-            for j in range(num_cols):
-                row.append(batched_real_mat.element(i, j).debug(length))
-            result.append(row)
-
-        return np.array(result)
-
-
-def get_scheme(poly_mods, plaintext_mods):
-    scheme = SchemeBFV_CRT(
-        poly_mods, plaintext_mods
+def get_bfv_scheme(poly_mods, plaintext_mods, scale, default_weight_scale):
+    scheme = CRTScheme(
+        poly_mods, plaintext_mods, scale, default_weight_scale
     )
-
     return scheme
 
-if __name__ == '__main__':
-    creator = Creator(get_scheme())
-
-    a = np.random.uniform(-1, 1, (5, 3))
-    b = np.random.uniform(-1, 1, (3, 6))
-    c = np.matmul(a, b)
-
-    a_enc = creator.encrypt(a)
-    c_enc = a_enc.mult_plain(b)
-
-    c_dec = creator.debug(c_enc)
-    print(c)
-    print(c_dec)
-
-
-
+def get_ckks_scheme(poly_mods):
+    scheme = SchemeCKKS(
+        poly_mods
+    )
+    return scheme
 '''
 class BatchedVec(BatchedReal):
     def __init__(self, v, scale):
