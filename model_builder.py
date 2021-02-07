@@ -5,6 +5,8 @@ from schemes import *
 from lin_algebra import *
 from creator import Creator
 import math
+import time
+
 
 class Layer:
     def __init__(self, input_shape, output_shape):
@@ -20,7 +22,7 @@ class Layer:
 
         received_shape = (dim1, dim2, dim3)
         if received_shape != self.input_shape:
-            raise Exception('Input data has wrong shape: received %s, expected %s' %(received_shape, self.input_shape))
+            raise Exception('Input data has wrong shape: received %s, expected %s' % (received_shape, self.input_shape))
 
     def description(self):
         pass
@@ -56,7 +58,7 @@ class ConvLayer(Layer):
         super().__init__(input_shape=None, output_shape=None)
 
     def description(self):
-        return 'Conv2D layer, input shape = {}, output shape = {}, weights shape = {}'\
+        return 'Conv2D layer, input shape = {}, output shape = {}, weights shape = {}' \
             .format(self.input_shape, self.output_shape, self.weights.shape)
 
     def configure_input(self, input_shape):
@@ -80,10 +82,12 @@ class ConvLayer(Layer):
         expected_extra = (self.output_shape[0],)
 
         if weights.shape != expected:
-            raise Exception('Incompatible weights for convolution layer. Expected %s, received %s' % (expected, weights.shape))
+            raise Exception(
+                'Incompatible weights for convolution layer. Expected %s, received %s' % (expected, weights.shape))
 
         if extra.shape != expected_extra:
-            raise Exception('Incompatible bias weights for convolution layer. Expected %s, received %s' % (expected_extra, weights.shape))
+            raise Exception('Incompatible bias weights for convolution layer. Expected %s, received %s' % (
+            expected_extra, weights.shape))
 
         self.weights = weights
         self.biases = extra
@@ -104,7 +108,7 @@ class ConvLayer(Layer):
         weights = np.transpose(self.weights, (2, 0, 1, 3))
 
         for j_output in range(self.output_shape[0]):
-            #layer_mapped = np.zeros((self.output_shape[1], self.output_shape[2]), dtype=object)
+            # layer_mapped = np.zeros((self.output_shape[1], self.output_shape[2]), dtype=object)
             layer_mapped = self.creator.zero_mat(self.output_shape[1], self.output_shape[2])
 
             for r in range(self.output_shape[1]):
@@ -118,13 +122,15 @@ class ConvLayer(Layer):
 
                     for i_input in range(0, self.input_shape[0]):
                         layer = input_data[i_input]
-                        kernel_area_layer = layer.subregion(r_v, r_v + self.kernel_size[0], c_v, c_v + self.kernel_size[1])
+                        kernel_area_layer = layer.subregion(r_v, r_v + self.kernel_size[0], c_v,
+                                                            c_v + self.kernel_size[1])
                         if i_input == 0:
                             kernel_area = kernel_area_layer.flatten()
                         else:
                             kernel_area.column_concat(kernel_area_layer.flatten())
 
-                    val = kernel_area.flatten().mult_plain(kernel.flatten().reshape(-1, 1), self.weight_scale).element(0, 0)
+                    val = kernel_area.flatten().mult_plain(kernel.flatten().reshape(-1, 1), self.weight_scale).element(
+                        0, 0)
                     val.add_raw_in_place(self.biases[j_output])
                     layer_mapped.set_element(r, c, val)
 
@@ -132,11 +138,12 @@ class ConvLayer(Layer):
                     if progress % step == 0:
                         print('Progress: %.2f percent' % (progress / total * 100))
 
-            #layer_mapped = self.creator.mat(layer_mapped)
+            # layer_mapped = self.creator.mat(layer_mapped)
 
             output_layers.append(layer_mapped)
 
         return output_layers
+
 
 def AveragePooling(Layer):
     def __init__(self):
@@ -144,6 +151,7 @@ def AveragePooling(Layer):
 
     def configure_input(self, input_shape):
         self.input_shape = input_shape
+
 
 class Flatten(Layer):
     def __init__(self):
@@ -166,12 +174,13 @@ class Flatten(Layer):
             temp.column_concat(input_data[i].flatten())
         return [temp]
 
+
 class DenseLayer(Layer):
     def __init__(self, output_length):
         super().__init__(input_shape=None, output_shape=(1, 1, output_length))
 
     def description(self):
-        return 'Dense layer, input shape = {}, output shape = {}, weights shape = {}'.\
+        return 'Dense layer, input shape = {}, output shape = {}, weights shape = {}'. \
             format(self.input_shape, self.output_shape, self.weights.shape)
 
     def configure_input(self, input_shape):
@@ -183,9 +192,11 @@ class DenseLayer(Layer):
         expected = (self.input_shape[2], self.output_shape[2])
         expected_extra = (self.output_shape[2],)
         if weights.shape != expected:
-            raise Exception('Incompatible weights for dense layer. Expected %s, received %s' % (expected, weights.shape))
+            raise Exception(
+                'Incompatible weights for dense layer. Expected %s, received %s' % (expected, weights.shape))
         if extra.shape != expected_extra:
-            raise Exception('Expected to have bias weights of dimension %s, received %s' % (expected_extra, extra.shape))
+            raise Exception(
+                'Expected to have bias weights of dimension %s, received %s' % (expected_extra, extra.shape))
         self.weights = weights
         self.biases = extra
 
@@ -195,13 +206,14 @@ class DenseLayer(Layer):
         mat.add_raw_in_place(raw_mat=self.biases.reshape(1, -1), debug=True)
         return [mat]
 
+
 class ActivationLayer(Layer):
     def __init__(self, mode='square'):
         super().__init__(input_shape=None, output_shape=None)
         self.mode = mode
 
     def description(self):
-        return 'Activation layer, mode = {}, input shape = {}, output shape = {}'.\
+        return 'Activation layer, mode = {}, input shape = {}, output shape = {}'. \
             format(self.mode, self.input_shape, self.output_shape)
 
     def configure_input(self, input_shape):
@@ -217,6 +229,7 @@ class ActivationLayer(Layer):
 
         return input_data
 
+
 class Model:
     def __init__(self, creator):
         self.layers = []
@@ -227,7 +240,6 @@ class Model:
     def summary(self):
         if not self.compiled or not self.weights_loaded:
             raise Exception('Model summary cannot be outputed before compilation and weight-loading.')
-
 
         text = '-------Summary of model-------\n'
 
@@ -247,9 +259,6 @@ class Model:
         output_data = self.apply(input_data)[0]
 
         decrypted = np.array(creator.debug(output_data, length))
-        # for i in range(10):
-        #     l = list(decrypted[:, :, i][0])
-        #     print([self.sigmoid(x) for x in l])
 
         predictions = []
         outputs = []
@@ -262,15 +271,20 @@ class Model:
 
         return predictions, outputs
 
-
     def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
         if not self.compiled:
             raise Exception('Model cannot be used before compilation')
+
         prev_output = input_data
         for i in range(len(self.layers)):
+            print('layer ' + str(i) + ' started')
+            start = time.process_time()
+
             self.layers[i].check_input_shape(prev_output)
             prev_output = self.layers[i].apply(prev_output)
-            prev_output[0].noise()
+            # prev_output[0].noise()
+
+            print('layer ' + str(i) + ' ended. Time elapsed: ' + str(time.process_time() - start))
         return prev_output
 
     def add(self, layer):
@@ -302,6 +316,7 @@ class Model:
             raise Exception('Weights error: does not match number of layers in model.')
 
         for i in range(0, len(self.layers)):
+            print('Loading weights of layer %s' % i)
             self.layers[i].set_weight_scale(scale)
             self.layers[i].load_weights(weights=weights[i][0], extra=weights[i][1])
 
@@ -325,65 +340,56 @@ def accuracy(a, b):
             count += 1
     return count / len(a)
 
-if __name__ == '__main__':
-    #scheme = get_bfv_scheme(512 * 16 * 1, [20,21,22], 16, 16)
 
+if __name__ == '__main__':
+    N = 8192
+
+    # scheme = get_bfv_scheme(512 * 16 * 1, [20,21,22], 16, 16)
     scheme = get_ckks_scheme(512 * 16 * 2)
 
     creator = Creator(scheme)
     print('------Summary of scheme-------')
     scheme.summary()
 
-    # mat_a = np.random.uniform(-1, 1, (3,3))
-    # myfunc_vec = np.vectorize(lambda x: x**32)
-    # mat_a_pow_5 = myfunc_vec(mat_a)
+    # mat_a = np.random.uniform(-10, 10, (3,3))
+    # mat_b = np.random.uniform(-10, 10, (3,3))
     #
     # mat_a_enc = creator.encrypt(mat=np.array([mat_a]))
+    # mat_a_enc = mat_a_enc.mult_plain(mat_b)
     #
-    # mat_a_enc.square_in_place()
-    # mat_a_enc.square_in_place()
-    # mat_a_enc.square_in_place()
-    # mat_a_enc.square_in_place()
-    # mat_a_enc.square_in_place()
+    # #mat_a_enc.add_raw_in_place(mat_a)
+    # mat_a_dec = creator.debug(mat_a_enc, 1)
     #
-    #
-    # mat_b = np.random.uniform(-1, 1, (3, 3))
-    #
-    # mat_c_enc = mat_a_enc.mult_plain(mat_b)
-    #
-    # mat_c_dec = creator.debug(mat_c_enc, 1)
-    #
-    # print(np.matmul(mat_a_pow_5, mat_b))
-    # print(mat_c_dec)
+    # print(mat_a_dec)
+    # print(mat_a * mat_b)
     #
     # exit(0)
 
     model = Model(creator)
-    model.add(InputLayer(input_shape=(1, 28, 28)))
-    model.add(ConvLayer(kernel_size=(5, 5), stride=4, padding=0, num_maps=5))
-    model.add(ActivationLayer(mode='identity'))
-    model.add(ConvLayer(kernel_size=(5, 5), stride=4, padding=0, num_maps=50))
+    model.add(InputLayer(input_shape=(3, 32, 32)))
+    model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=16))
+    model.add(ActivationLayer(mode='square'))
+    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=32))
     model.add(ActivationLayer(mode='square'))
     model.add(Flatten())
     model.add(DenseLayer(output_length=10))
 
-    weights = np.load('data/weights.npy', allow_pickle=True)
+    weights = np.load('data/weights_cifar.npy', allow_pickle=True)
 
     model.compile()
     model.load_weights(weights, scale=16)
     model.summary()
 
-    mnist_train_features = np.load('data/mnist_test_features.npy')[:2000]
-    mnist_train_features = mnist_train_features.squeeze()
+    test_features = np.load('data/cifar_test_features.npy')[:N]
+    test_features = test_features.squeeze()
 
-    preds_base = np.load('data/model_preds.npy')[:2000]
-    outputs_base = np.load('data/model_outputs.npy')[:2000]
+    preds_base = np.load('data/model_preds_cifar.npy')[:N]
+    outputs_base = np.load('data/model_outputs_cifar.npy')[:N]
 
+    print('Encrypting %s items' % len(test_features))
 
-    print('Encrypting %s items' % len(mnist_train_features))
-    encrypted = creator.encrypt(mat=mnist_train_features)
-
-    print('Beginning inference...')
-    preds_new, outputs_new = model.predict(input_data=[encrypted], creator=creator, length=2000)
+    model.predict(input_data=creator.encrypt(mat=test_features),
+                  creator=creator,
+                  length=N)
 
     print(accuracy(preds_new, preds_base))

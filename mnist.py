@@ -1,13 +1,13 @@
-from keras.datasets import mnist
+from keras.datasets import mnist, cifar10
 from keras.utils import to_categorical
 from keras.models import Sequential
 from keras.layers import Conv2D
 from keras.layers import Dense
-from keras.layers import Flatten
-from keras.optimizers import SGD
+from keras.layers import Flatten, Dropout, BatchNormalization
+from keras.optimizers import SGD, Adam
 
 # load train and test dataset
-def load_dataset():
+def load_dataset_mnist():
     # load dataset
     (trainX, trainY), (testX, testY) = mnist.load_data()
     # reshape dataset to have a single channel
@@ -18,6 +18,16 @@ def load_dataset():
     testY = to_categorical(testY)
     return trainX, trainY, testX, testY
 
+def load_dataset_cifar10():
+    # load dataset
+    (trainX, trainY), (testX, testY) = cifar10.load_data()
+    # reshape dataset to have a single channel
+    trainX = trainX.reshape((trainX.shape[0], 32, 32, 3))
+    testX = testX.reshape((testX.shape[0], 32, 32, 3))
+    # one hot encode target values
+    trainY = to_categorical(trainY)
+    testY = to_categorical(testY)
+    return trainX, trainY, testX, testY
 
 # scale pixels
 def prep_pixels(train, test):
@@ -43,22 +53,20 @@ def identity(x):
 # define cnn model
 def define_model():
     model = Sequential()
-    model.add(Conv2D(5, (5, 5), strides=4, input_shape=(28, 28, 1), activation=identity))
-    model.add(Conv2D(50, (5, 5), strides=4, activation=square_activation))
+    model.add(Conv2D(16, (3, 3), strides=2, input_shape=(32,32,3), activation=square_activation))
+    model.add(Conv2D(32, (4, 4), strides=2, activation=square_activation))
     model.add(Flatten())
     model.add(Dense(10, activation='sigmoid'))
+
     # compile model
-    opt = SGD(lr=0.01, momentum=0.9)
+    opt = Adam(lr=0.005)
     model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
     return model
-
-
 
 # load dataset
 import numpy as np
 
-
-trainX, trainY, testX, testY = load_dataset()
+trainX, trainY, testX, testY = load_dataset_cifar10()
 trainX, testX = prep_pixels(trainX, testX)
 
 # trainY = np.random.uniform(-3, 3, (len(trainY), 845))
@@ -68,7 +76,9 @@ model.summary()
 model.fit(
     x=trainX,
     y=trainY,
-    epochs=8,
+    epochs=10,
+    validation_data=(testX, testY),
+    batch_size=128,
 )
 
 # model.load_weights('model_weights')
@@ -78,9 +88,7 @@ preds = model.predict(testX)
 pred_labs = []
 for v in preds:
     pred_labs.append(np.argmax(v))
-print(pred_labs)
 
-print(model.layers[0].weights[1].numpy())
 
 def rearrange_dense_weights(weights, groups):
     new_weights = []
@@ -90,9 +98,6 @@ def rearrange_dense_weights(weights, groups):
     new_weights = np.array(new_weights)
     return new_weights
 
-print(model.layers[0].weights[0].numpy().shape)
-print(model.layers[1].weights[0].numpy().shape)
-
 w = []
 w.append([None, None])
 w.append([model.layers[0].weights[0].numpy(), model.layers[0].weights[1].numpy()])
@@ -100,70 +105,70 @@ w.append([None, None])
 w.append([model.layers[1].weights[0].numpy(), model.layers[1].weights[1].numpy()])
 w.append([None, None])
 w.append([None, None])
-w.append([rearrange_dense_weights(model.layers[3].weights[0].numpy(), 50), model.layers[3].weights[1].numpy()])
-
+w.append([rearrange_dense_weights(model.layers[3].weights[0].numpy(), 32), model.layers[3].weights[1].numpy()])
 w = np.array(w, dtype=object)
 
-np.save('data/weights.npy', w)
-np.save('data/model_preds.npy', np.array(pred_labs))
-np.save('data/model_outputs.npy', np.array(model.predict(testX)))
+np.save('data/weights_cifar.npy', w)
+np.save('data/model_preds_cifar.npy', np.array(pred_labs))
+np.save('data/model_outputs_cifar.npy', np.array(model.predict(testX)))
+np.save('data/cifar_test_features.npy', testX)
 
-exit(0)
-
-def conv(input_data, in_maps, out_maps, out_w, out_h, kernel_w, kernel_h, weights, biases):
-    weights = np.transpose(weights, (2, 0, 1, 3))
-
-    output_layers = []
-
-    for j_output in range(out_maps):
-        layer_mapped = np.zeros((out_h, out_w), dtype=object)
-
-        for r in range(out_h):
-            for c in range(out_w):
-                r_v = r * 2
-                c_v = c * 2
-
-                kernel = weights[:, :, :, j_output]
-                kernel_area = input_data[:, r_v:r_v + kernel_w, c_v:c_v+kernel_h]
-
-                # if in_maps == 3:
-                #     print(kernel)
-                #     kernel = kernel.flatten()
-                #     print(kernel)
-                #
-                #     print(kernel_area)
-                #     kernel_area = kernel_area.flatten()
-                #     print(kernel_area)
-                #
-                #     exit(0)
-                #
-                kernel = kernel.flatten()
-                kernel_area = kernel_area.flatten()
-
-                layer_mapped[r][c] = np.dot(kernel, kernel_area)
-                layer_mapped[r][c] += biases[j_output]
-
-        output_layers.append(layer_mapped)
-
-    return np.array(output_layers)
-
-def dense(input_data, weights, biases):
-    return np.matmul(input_data, weights) + biases
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
-
-def apply(example):
-    data = np.transpose(example, (2, 0, 1))
-    data = conv(data, 1, 3, 13, 13, 3, 3, w[1][0], w[1][1])
-    data = conv(data, 3, 3, 6, 6, 3, 3, w[2][0], w[2][1])
-    data = data.flatten()
-    data = dense(data, w[4][0], w[4][1])
-    data = np.array(data, dtype=float)
-    return sigmoid(data)
-
-print(apply(testX[0]))
-print(preds[0])
+# exit(0)
+#
+# def conv(input_data, in_maps, out_maps, out_w, out_h, kernel_w, kernel_h, weights, biases):
+#     weights = np.transpose(weights, (2, 0, 1, 3))
+#
+#     output_layers = []
+#
+#     for j_output in range(out_maps):
+#         layer_mapped = np.zeros((out_h, out_w), dtype=object)
+#
+#         for r in range(out_h):
+#             for c in range(out_w):
+#                 r_v = r * 2
+#                 c_v = c * 2
+#
+#                 kernel = weights[:, :, :, j_output]
+#                 kernel_area = input_data[:, r_v:r_v + kernel_w, c_v:c_v+kernel_h]
+#
+#                 # if in_maps == 3:
+#                 #     print(kernel)
+#                 #     kernel = kernel.flatten()
+#                 #     print(kernel)
+#                 #
+#                 #     print(kernel_area)
+#                 #     kernel_area = kernel_area.flatten()
+#                 #     print(kernel_area)
+#                 #
+#                 #     exit(0)
+#                 #
+#                 kernel = kernel.flatten()
+#                 kernel_area = kernel_area.flatten()
+#
+#                 layer_mapped[r][c] = np.dot(kernel, kernel_area)
+#                 layer_mapped[r][c] += biases[j_output]
+#
+#         output_layers.append(layer_mapped)
+#
+#     return np.array(output_layers)
+#
+# def dense(input_data, weights, biases):
+#     return np.matmul(input_data, weights) + biases
+#
+# def sigmoid(x):
+#     return 1 / (1 + np.exp(-x))
+#
+# def apply(example):
+#     data = np.transpose(example, (2, 0, 1))
+#     data = conv(data, 1, 3, 13, 13, 3, 3, w[1][0], w[1][1])
+#     data = conv(data, 3, 3, 6, 6, 3, 3, w[2][0], w[2][1])
+#     data = data.flatten()
+#     data = dense(data, w[4][0], w[4][1])
+#     data = np.array(data, dtype=float)
+#     return sigmoid(data)
+#
+# print(apply(testX[0]))
+# print(preds[0])
 
 
 

@@ -27,6 +27,9 @@ def extended_gcd(a, b):
         old_t, t = t, old_t - q * t
     return old_s, old_t, old_r
 
+def inverse(p, q):
+    return extended_gcd(p, q)[0]
+
 
 def crt(p: List[int], q: List[int]):
     if len(p) != len(q):

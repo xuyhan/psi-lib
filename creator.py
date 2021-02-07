@@ -15,21 +15,23 @@ class Creator:
         elif isinstance(self.scheme, SchemeCKKS):
             return BatchedRealDouble(value, self.scheme)
 
-    def encrypt(self, mat: np.ndarray) -> BatchedRealMat:
-        if len(mat.shape) != 3:
-            raise Exception('Expected input to have three dimensions. Received: %s' % len(mat.shape))
+    def encrypt(self, mat: np.ndarray) -> List[BatchedRealMat]:
+        if len(mat.shape) != 4:
+            raise Exception('Expected input to have four dimensions. Received: %s' % len(mat.shape))
 
-        mat_data = []
+        channels = []
+        for c in range(mat.shape[3]):
+            mat_data = []
+            for i in range(mat.shape[1]):
+                row_data = []
+                for j in range(mat.shape[2]):
+                    pixel_data = mat[:, i, j, c].reshape(1, -1)[0]
+                    batched_real = self.encrypt_value(np.array(pixel_data))
+                    row_data.append(batched_real)
+                mat_data.append(BatchedRealVec(row_data))
+            channels.append(BatchedRealMat(mat_data))
 
-        for i in range(mat.shape[1]):
-            row_data = []
-            for j in range(mat.shape[2]):
-                pixel_data = mat[:, i, j].reshape(1, -1)[0]
-                batched_real = self.encrypt_value(np.array(pixel_data))
-                row_data.append(batched_real)
-            mat_data.append(BatchedRealVec(row_data))
-
-        return BatchedRealMat(mat_data)
+        return channels
 
     def zero(self, batched_real: BatchedReal):
         if isinstance(self.scheme, CRTScheme):

@@ -85,6 +85,7 @@ class SchemeCKKS(Scheme):
         parms = EncryptionParameters(scheme_type.CKKS)
         parms.set_poly_modulus_degree(poly_modulus_degree)
         parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, [60,40,40,40,40,40,40,60]))
+        #parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, [60,60,60,60,60,60]))
 
         context = SEALContext.Create(parms)
 
@@ -161,6 +162,7 @@ class SchemeCKKS(Scheme):
 
     def add_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
         plaintext = self._batch_encode(v)
+
         self.mod_switch(cipher_a, plaintext)
 
         self.evaluator.add_plain_inplace(cipher_a, plaintext)
@@ -192,7 +194,6 @@ class SchemeCKKS(Scheme):
         self.mod_switch(cipher_a, plaintext)
 
         cipher_new = Ciphertext()
-
         self.evaluator.multiply_plain(cipher_a, plaintext, cipher_new)
 
         self.evaluator.rescale_to_next_inplace(cipher_new)
@@ -219,15 +220,13 @@ class SchemeCKKS(Scheme):
         return cipher_new
 
     def square_in_place(self, cipher_a: Ciphertext):
-        print(cipher_a.scale())
-
         self.evaluator.square_inplace(cipher_a)
         self.evaluator.relinearize_inplace(cipher_a, self.relin_keys)
         self.evaluator.rescale_to_next_inplace(cipher_a)
 
         cipher_a.scale(self.default_scale)
 
-        print("%.0f" % math.log(cipher_a.scale(), 2) + " bits")
+        #print("%.0f" % math.log(cipher_a.scale(), 2) + " bits")
 
 
     def slot_count(self):
