@@ -1,5 +1,5 @@
 from schemes import *
-from batched_real import BatchedReal
+from batched_real import HEReal
 
 class BatchedInteger:
     def __init__(self, v, scheme: CRTScheme):
@@ -93,7 +93,7 @@ class BatchedInteger:
         return result_crt
 
 
-class BatchedRealInteger(BatchedReal):
+class HERealInteger(HEReal):
     def __init__(self, v, scale, scheme: CRTScheme):
         self.scale = scale
         self.scheme = scheme
@@ -103,49 +103,49 @@ class BatchedRealInteger(BatchedReal):
             arg = (arg * scale).astype(int)
         self.batched_int = BatchedInteger(arg, scheme)
 
-    def add(self, batched_real):
-        if self.scale != batched_real.scale:
+    def add(self, he_real):
+        if self.scale != he_real.scale:
             raise Exception('scale mismatch')
 
-        return BatchedRealInteger(self.batched_int.add(batched_real.batched_int).ciphertext, self.scale, self.batched_int.scheme)
+        return HERealInteger(self.batched_int.add(he_real.batched_int).ciphertext, self.scale, self.batched_int.scheme)
 
     def add_raw_in_place(self, raw: float):
         raw_int = int(raw * self.scale)
         self.batched_int.add_int_in_place(n=raw_int)
 
-    def add_in_place(self, batched_real):
-        if self.scale != batched_real.scale:
+    def add_in_place(self, he_real):
+        if self.scale != he_real.scale:
             raise Exception('Scale mismatch')
-        self.batched_int.add_in_place(batched_real.batched_int)
+        self.batched_int.add_in_place(he_real.batched_int)
 
-    def multiply(self, batched_real):
-        return BatchedRealInteger(self.batched_int.multiply(batched_real.batched_int).ciphertext,
-                                  self.scale * batched_real.scale,
-                                  self.batched_int.scheme)
+    def multiply(self, he_real):
+        return HERealInteger(self.batched_int.multiply(he_real.batched_int).ciphertext,
+                             self.scale * he_real.scale,
+                             self.batched_int.scheme)
 
     def multiply_raw(self, real: float):
         real = int(real * self.scheme.default_weight_scale)
-        return BatchedRealInteger(self.batched_int.multiply_int(real).ciphertext,
-                           self.scale * self.scheme.default_weight_scale,
-                           self.batched_int.scheme)
+        return HERealInteger(self.batched_int.multiply_int(real).ciphertext,
+                             self.scale * self.scheme.default_weight_scale,
+                             self.batched_int.scheme)
 
-    def multiply_in_place(self, batched_real):
-        self.batched_int.multiply_in_place(batched_real.batched_int)
-        self.scale *= batched_real.scale
+    def multiply_in_place(self, he_real):
+        self.batched_int.multiply_in_place(he_real.batched_int)
+        self.scale *= he_real.scale
 
     def square(self):
-        return BatchedRealInteger(self.batched_int.square().ciphertext,
-                           self.scale ** 2,
-                           self.batched_int.scheme)
+        return HERealInteger(self.batched_int.square().ciphertext,
+                             self.scale ** 2,
+                             self.batched_int.scheme)
 
     def square_in_place(self):
         self.batched_int.square_in_place()
         self.scale = self.scale ** 2
 
     def sum(self):
-        return BatchedRealInteger(self.batched_int.sum().ciphertext,
-                           self.scale,
-                           self.batched_int.scheme)
+        return HERealInteger(self.batched_int.sum().ciphertext,
+                             self.scale,
+                             self.batched_int.scheme)
 
     def debug(self, length: int):
         result = self.batched_int.debug(length)
@@ -158,3 +158,10 @@ class BatchedRealInteger(BatchedReal):
 
     def noise(self):
         self.scheme.evaluate_ciphertext(self.batched_int.ciphertext)
+
+    def slot_count(self):
+        return self.scheme.slot_count()
+
+    def zeros(self):
+        v = [0 for _ in range(self.slot_count())]
+        return HERealInteger(v, self.scale, self.scheme)

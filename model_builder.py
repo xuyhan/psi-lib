@@ -1,12 +1,16 @@
 import numpy as np
 from typing import List
 
+from tqdm import tqdm
+
+from data_loader import load_data
 from schemes import *
 from lin_algebra import *
 from creator import Creator
 import math
 import time
 
+import low_lat
 
 class Layer:
     def __init__(self, input_shape, output_shape):
@@ -16,7 +20,7 @@ class Layer:
         self.weight_scale = None
         self.creator = None
 
-    def check_input_shape(self, input_data: List[BatchedRealMat]):
+    def check_input_shape(self, input_data: List[HETensor]):
         dim1 = len(input_data)
         dim2, dim3 = input_data[0].shape()
 
@@ -36,7 +40,10 @@ class Layer:
     def set_weight_scale(self, scale):
         self.weight_scale = scale
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
+        return input_data
+
+    def apply_fast(self, input_data: HETensor) -> HETensor:
         return input_data
 
 
@@ -92,23 +99,45 @@ class ConvLayer(Layer):
         self.weights = weights
         self.biases = extra
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
-        print('-----Applying conv layer-----')
+    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+        print(self.description())
 
-        for layer in input_data:
-            for _ in range(self.padding):
-                layer.pad_in_place()
+        out = []
+
+        pbar = tqdm(total=self.weights.shape[-1] * self.weights.shape[-2])
+
+        for j in range(self.weights.shape[-1]):
+            fm_out = None
+
+            for i, t in enumerate(input_data):
+                kernel = self.weights[:, :, i, j]
+
+                if fm_out is None:
+                    fm_out = low_lat.convolve(t, kernel)
+                else:
+                    fm_out.add_in_place(low_lat.convolve(t, kernel))
+
+                pbar.update(1)
+
+            out.append(fm_out)
+
+        pbar.close()
+        exit(0)
+
+        return out
+
+
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
+        print(self.description())
 
         output_layers = []
 
         total = self.output_shape[0] * self.output_shape[1] * self.output_shape[2]
-        step = total // 10
-        progress = 0
+        pbar = tqdm(total=total)
 
         weights = np.transpose(self.weights, (2, 0, 1, 3))
 
         for j_output in range(self.output_shape[0]):
-            # layer_mapped = np.zeros((self.output_shape[1], self.output_shape[2]), dtype=object)
             layer_mapped = self.creator.zero_mat(self.output_shape[1], self.output_shape[2])
 
             for r in range(self.output_shape[1]):
@@ -117,7 +146,6 @@ class ConvLayer(Layer):
                     c_v = c * self.stride
 
                     kernel = np.squeeze(weights[:, :, :, j_output])
-
                     kernel_area = None
 
                     for i_input in range(0, self.input_shape[0]):
@@ -129,18 +157,21 @@ class ConvLayer(Layer):
                         else:
                             kernel_area.column_concat(kernel_area_layer.flatten())
 
-                    val = kernel_area.flatten().mult_plain(kernel.flatten().reshape(-1, 1), self.weight_scale).element(
-                        0, 0)
+                    val = kernel_area.flatten().row(0)
+                    val = val.multiply_element_wise_plain(kernel.flatten().reshape(1, -1)[0])
+                    val = val.get_sum()
                     val.add_raw_in_place(self.biases[j_output])
+
                     layer_mapped.set_element(r, c, val)
 
-                    progress += 1
-                    if progress % step == 0:
-                        print('Progress: %.2f percent' % (progress / total * 100))
+                    pbar.update(1)
 
-            # layer_mapped = self.creator.mat(layer_mapped)
+                    # progress += 1
+                    # print('Progress: %.2f percent' % (progress / total * 100))
 
             output_layers.append(layer_mapped)
+
+        pbar.close()
 
         return output_layers
 
@@ -167,7 +198,7 @@ class Flatten(Layer):
             k *= max(1, input_shape[i])
         self.output_shape = (1, 1, k)
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print('-----Applying flatten layer-----')
         temp = input_data[0].flatten()
         for i in range(1, len(input_data)):
@@ -200,7 +231,7 @@ class DenseLayer(Layer):
         self.weights = weights
         self.biases = extra
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print('-----Applying dense layer-----')
         mat = input_data[0].mult_plain(self.weights, self.weight_scale, debug=True)
         mat.add_raw_in_place(raw_mat=self.biases.reshape(1, -1), debug=True)
@@ -220,7 +251,7 @@ class ActivationLayer(Layer):
         self.input_shape = input_shape
         self.output_shape = input_shape
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print('-----Applying activation layer-----')
 
         if self.mode == 'square':
@@ -236,6 +267,7 @@ class Model:
         self.compiled = False
         self.weights_loaded = False
         self.creator = creator
+        self.data_mode = None
 
     def summary(self):
         if not self.compiled or not self.weights_loaded:
@@ -251,11 +283,10 @@ class Model:
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-x))
 
-    def predict(self, input_data: List[BatchedRealMat], creator: Creator, length: int) -> List[int]:
-        output_shape = self.layers[-1].output_shape
-        if output_shape[0] > 1 or output_shape[1] > 1:
-            raise Exception('Cannot predict when last layer is not flat'
-                            )
+    def predict(self, input_data, creator: Creator, length: int):
+        if isinstance(input_data, HETensor):
+            input_data = [input_data]
+
         output_data = self.apply(input_data)[0]
 
         decrypted = np.array(creator.debug(output_data, length))
@@ -271,38 +302,38 @@ class Model:
 
         return predictions, outputs
 
-    def apply(self, input_data: List[BatchedRealMat]) -> List[BatchedRealMat]:
+    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         if not self.compiled:
             raise Exception('Model cannot be used before compilation')
 
         prev_output = input_data
+
         for i in range(len(self.layers)):
-            print('layer ' + str(i) + ' started')
-            start = time.process_time()
+            if self.data_mode == 0:
+                self.layers[i].check_input_shape(prev_output)
+                prev_output = self.layers[i].apply(prev_output)
+            else:
+                prev_output = self.layers[i].apply_fast(prev_output)
 
-            self.layers[i].check_input_shape(prev_output)
-            prev_output = self.layers[i].apply(prev_output)
-            # prev_output[0].noise()
-
-            print('layer ' + str(i) + ' ended. Time elapsed: ' + str(time.process_time() - start))
         return prev_output
 
     def add(self, layer):
         layer.creator = self.creator
         self.layers.append(layer)
 
-    def compile(self):
+    def compile(self, data_mode=0):
         if not self.layers:
             raise Exception('Model is empty')
 
         if not isinstance(self.layers[0], InputLayer):
             raise Exception('No input layer found')
 
+        self.data_mode = data_mode
+
         input_layer = self.layers[0]
         prev_output_shape = input_layer.output_shape
 
         for i in range(1, len(self.layers)):
-            print(prev_output_shape)
             layer = self.layers[i]
             layer.configure_input(input_shape=prev_output_shape)
             prev_output_shape = layer.output_shape
@@ -316,7 +347,6 @@ class Model:
             raise Exception('Weights error: does not match number of layers in model.')
 
         for i in range(0, len(self.layers)):
-            print('Loading weights of layer %s' % i)
             self.layers[i].set_weight_scale(scale)
             self.layers[i].load_weights(weights=weights[i][0], extra=weights[i][1])
 
@@ -341,55 +371,137 @@ def accuracy(a, b):
     return count / len(a)
 
 
-if __name__ == '__main__':
+def cifar():
     N = 8192
-
-    # scheme = get_bfv_scheme(512 * 16 * 1, [20,21,22], 16, 16)
     scheme = get_ckks_scheme(512 * 16 * 2)
-
     creator = Creator(scheme)
-    print('------Summary of scheme-------')
     scheme.summary()
-
-    # mat_a = np.random.uniform(-10, 10, (3,3))
-    # mat_b = np.random.uniform(-10, 10, (3,3))
-    #
-    # mat_a_enc = creator.encrypt(mat=np.array([mat_a]))
-    # mat_a_enc = mat_a_enc.mult_plain(mat_b)
-    #
-    # #mat_a_enc.add_raw_in_place(mat_a)
-    # mat_a_dec = creator.debug(mat_a_enc, 1)
-    #
-    # print(mat_a_dec)
-    # print(mat_a * mat_b)
-    #
-    # exit(0)
 
     model = Model(creator)
     model.add(InputLayer(input_shape=(3, 32, 32)))
     model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=16))
     model.add(ActivationLayer(mode='square'))
-    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=32))
+    model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=16))
     model.add(ActivationLayer(mode='square'))
     model.add(Flatten())
+    model.add(DenseLayer(output_length=32))
+    model.add(ActivationLayer(mode='square'))
+    model.add(DenseLayer(output_length=32))
+    model.add(ActivationLayer(mode='square'))
     model.add(DenseLayer(output_length=10))
 
-    weights = np.load('data/weights_cifar.npy', allow_pickle=True)
+    weights, test_features, preds_base, outputs_base = load_data(name='CIFAR')
+
+    test_features = test_features[:N]
+    preds_base = preds_base[:N]
+    outputs_base = outputs_base[:N]
 
     model.compile()
     model.load_weights(weights, scale=16)
     model.summary()
 
-    test_features = np.load('data/cifar_test_features.npy')[:N]
-    test_features = test_features.squeeze()
+    print('Encrypting %s items' % len(test_features))
 
-    preds_base = np.load('data/model_preds_cifar.npy')[:N]
-    outputs_base = np.load('data/model_outputs_cifar.npy')[:N]
+    preds_new, _ = model.predict(input_data=creator.encrypt_simd(mat=test_features),
+                                 creator=creator,
+                                 length=N)
+
+    print(accuracy(preds_new, preds_base))
+
+
+def mnist():
+    N = 8192
+    scheme = get_ckks_scheme(512 * 16 * 2)
+
+    creator = Creator(scheme)
+    scheme.summary()
+
+    model = Model(creator)
+    model.add(InputLayer(input_shape=(1, 28, 28)))
+    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=50))
+    model.add(ActivationLayer(mode='square'))
+    model.add(Flatten())
+    model.add(DenseLayer(output_length=32))
+    model.add(Flatten())
+    model.add(DenseLayer(output_length=10))
+
+    weights, test_features, preds_base, outputs_base = load_data(name='MNIST')
+
+    test_features = test_features[:N]
+    preds_base = preds_base[:N]
+    outputs_base = outputs_base[:N]
+
+    model.compile()
+    model.load_weights(weights, scale=16)
+    model.summary()
 
     print('Encrypting %s items' % len(test_features))
 
-    model.predict(input_data=creator.encrypt(mat=test_features),
-                  creator=creator,
-                  length=N)
+    preds_new, _ = model.predict(input_data=creator.encrypt_simd(mat=test_features),
+                                 creator=creator,
+                                 length=N)
 
     print(accuracy(preds_new, preds_base))
+
+
+def mnist_fast():
+    N = 8192
+    scheme = get_ckks_scheme(512 * 16 * 2)
+
+    creator = Creator(scheme)
+    scheme.summary()
+
+    model = Model(creator)
+    model.add(InputLayer(input_shape=(1, 28, 28)))
+    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=50))
+    model.add(ActivationLayer(mode='square'))
+    model.add(Flatten())
+    model.add(DenseLayer(output_length=32))
+    model.add(Flatten())
+    model.add(DenseLayer(output_length=10))
+
+    weights, test_features, preds_base, outputs_base = load_data(name='MNIST')
+
+    image = test_features[0]
+    preds_base = preds_base[0]
+    outputs_base = outputs_base[0]
+
+    model.compile(data_mode=1)
+    model.load_weights(weights, scale=16)
+    model.summary()
+
+    data = creator.encrypt_dense(mat=image)
+    img_groups = creator.obtain_image_groups(mat=image, k=4, s=2)
+
+    preds_new, _ = model.predict(input_data=img_groups,
+                                 creator=creator,
+                                 length=N)
+    
+
+if __name__ == '__main__':
+    mnist_fast()
+    #scheme = get_bfv_scheme(512 * 16 * 1, [20,21,22], 16, 16)
+
+    # N = 8192
+    # scheme = get_ckks_scheme(512 * 16 * 2)
+    #
+    # creator = Creator(scheme)
+    #
+    # mat_a = np.array([[[[0.5], [0.4]],
+    #                   [[-0.5], [0.5]]]])
+    #
+    # mat_a_enc = creator.encrypt(mat=mat_a)[0]
+    #
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    # mat_a_enc.square_in_place()
+    #
+    # mat_a_dec = creator.debug(mat_a_enc, 1)
+    #
+    # print(mat_a_dec)
+    # #print(mat_a * mat_b)
+
+    exit(0)

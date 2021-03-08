@@ -1,12 +1,13 @@
 import numpy as np
 import random
 import math
-from Polynomial import Polynomial
+from polynomial import Polynomial
 from numpy.polynomial.polynomial import Polynomial as Polynomial_np
 # First we set the parameters
-from Logger import debug as d
-from Logger import debug_colours
-from Polynomial import special_mod
+from logger import debug as d
+from logger import debug_colours
+from polynomial import special_mod
+import time
 
 
 class Params:
@@ -19,7 +20,7 @@ class Params:
         self.q_0 = 2 ** p_0
         self.q_L = self.q_0 * ((self.delta) ** L)
         self.poly_mod = polymod(N)
-        self.logP = 400
+        self.logP = 120
         self.P = 2 ** self.logP
 
         print("========Summary========")
@@ -70,19 +71,12 @@ class Encoder:
 
         return self.sigma_inverse(v)
 
-    def decode(self, p: Polynomial, real=True) -> np.array:
-        # d('decode', str(p), debug_colours.GREEN)
-        # p =  p * (1.0 / self.params.delta_l(1))
-        # d('decode', str(p), debug_colours.GREEN)
-        # # d('decode', str(p), debug_colours.GREEN)
-        # # p = p.right_shift(self.params.p)
-        d('decode', str(p), debug_colours.GREEN)
-
+    def decode(self, p: Polynomial, real=False) -> np.array:
         v = self.sigma(p)
         v = self.mirror_inv(v)
 
         if real:
-            v = np.real(v)
+            v = [x.args[0] for x in v]
 
         for i in range(len(v)):
             v[i] = v[i] / self.params.delta_l(1)
@@ -94,7 +88,7 @@ class Encoder:
         cs = np.linalg.solve(A, b)[::-1]
         cs = [np.round(np.real(c)) for c in cs]
 
-        return Polynomial.from_coef(cs).round_coefs_nearest()
+        return Polynomial.from_coef(cs, int(math.log2(self.N))).round_coefs_nearest()
 
     def sigma(self, p: Polynomial) -> np.array:
         outputs = []
@@ -103,7 +97,7 @@ class Encoder:
         for i in range(self.N):
             root = self.root ** (2 * i + 1)
 
-            output = p.p(root)
+            output = p_np(root)
             outputs.append(output)
 
         return np.array(outputs)
@@ -131,7 +125,7 @@ class Encoder:
 def polymod(N: int) -> Polynomial:
     coef = [1] + [0 for _ in range(N - 1)] + [1]
     coef = np.array(coef, dtype=object)
-    return Polynomial.from_coef(coef)
+    return Polynomial.from_coef(coef, int(math.log2(N)))
 
 def debug_poly(poly: Polynomial, Q_l):
     cs = poly.coef
@@ -160,21 +154,19 @@ class Gen:
         for i in range(h):
             coeffs[inds[i]] = balls[i]
 
-        print(coeffs)
-
-        return Polynomial.from_coef(coeffs)
+        return Polynomial.from_coef(coeffs, int(math.log2(n)))
 
     @staticmethod
     def gen_error(n: int) -> Polynomial:
         coefs = np.random.normal(scale=1.5, size=n)
         coefs = [special_mod(int(coefs[i]), n) for i in range(n)]
         d('gen_error', str(coefs))
-        return Polynomial.from_coef(coefs)
+        return Polynomial.from_coef(coefs, int(math.log2(n)))
 
     @staticmethod
     def gen_enc(n: int) -> Polynomial:
         coefs = np.random.choice([-1, 0, 1], size=n, p=[0.25, 0.5, 0.25])
-        return Polynomial.from_coef(coefs)
+        return Polynomial.from_coef(coefs, int(math.log2(n)))
 
     @staticmethod
     def gen_a(n: int, Q_l: int) -> Polynomial:
@@ -183,7 +175,7 @@ class Gen:
         for i in range(n):
             coeffs[i] = special_mod(random.randint(0, Q_l), Q_l)
 
-        return Polynomial.from_coef(coeffs)
+        return Polynomial.from_coef(coeffs, int(math.log2(n)))
 
 
 class KeyGen:
@@ -256,11 +248,8 @@ class Encryptor:
         c0 = c0.rem(self.params.poly_mod)
         c1 = c1.rem(self.params.poly_mod)
 
-        #c0 = c0.wrap_coefs(self.params.q_L)
-        #c1 = c1.wrap_coefs(self.params.q_L)
-
-        d('encrypt', 'c0_mod: ' + str(c0.p))
-        d('encrypt', 'c1_mod: ' + str(c1.p))
+        # c0 = c0.wrap_coefs(self.params.q_L)
+        # c1 = c1.wrap_coefs(self.params.q_L)
 
         return Ciphertext(c0, c1, self.params.L)
 
@@ -272,24 +261,12 @@ class Decryptor:
 
     def decrypt(self, ciphertext: Ciphertext):
         q_l = self.params.q_l(ciphertext.l)
-
         d('decrypt', 'modulus: ' + str(q_l))
 
         poly = ciphertext.c0 + ciphertext.c1 * self.sk[1]
-        d('decrypt', 'plaintext_: ' + str(poly))
-
-        from sympy import div
-
-        d('decrypt', 'plaintext//base: ' + str(div(poly.p, self.params.poly_mod.p)[0]))
 
         poly = poly.rem(self.params.poly_mod)
-        d('decrypt', 'plaintext rem base: ' + str(poly))
-
         poly = poly.wrap_coefs(q_l)
-        d('decrypt', 'plaintext wrap: ' + str(poly))
-
-        # if poly.check_overflow(q_l):
-        #     raise Exception("Cannot decrypt ciphertext!")
 
         return poly.fix_coefs(q_l)
 
@@ -321,57 +298,62 @@ class Evaluator:
     def mul(self, cipher1: Ciphertext, cipher2: Ciphertext, debug=False) -> Ciphertext:
         if cipher1.l != cipher2.l:
             raise Exception("Level mismatch: %s != %s" % (cipher1.l, cipher2.l))
-
-        d('mul', 'levels: ' + str(cipher1.l) + ', ' + str(cipher2.l))
-        d('mul', 'moduli: ' + str(self.params.q_l(cipher1.l)) + ', ' + str(self.params.q_l(cipher2.l)))
-        d('mul', 'cipher1 c0: ' + str(cipher1.c0))
-        d('mul', 'cipher1 c1: ' + str(cipher1.c1))
-        d('mul', 'cipher2 c0: ' + str(cipher2.c0))
-        d('mul', 'cipher2 c1: ' + str(cipher2.c1))
-
         q_l = self.params.q_l(cipher1.l)
 
+        start = time.process_time()
         d0 = cipher1.c0 * cipher2.c0
         d1 = cipher1.c0 * cipher2.c1 + cipher1.c1 * cipher2.c0
         d2 = cipher1.c1 * cipher2.c1
+        d('time1', str(time.process_time() - start), debug_colours.BOLD)
 
+        start = time.process_time()
         d0 = d0.rem(self.params.poly_mod)
         d1 = d1.rem(self.params.poly_mod)
         d2 = d2.rem(self.params.poly_mod)
+        d('time2', str(time.process_time() - start), debug_colours.BOLD)
 
+        start = time.process_time()
         d0 = d0.wrap_coefs(q_l)
         d1 = d1.wrap_coefs(q_l)
         d2 = d2.wrap_coefs(q_l)
+        d('time3', str(time.process_time() - start), debug_colours.BOLD)
 
-        # if True:
-        #     f0 = (self.ek[0] * (1.0 / self.params.P) * d2).round_coefs_nearest()
-        #     f1 = (self.ek[1] * (1.0 / self.params.P) * d2).round_coefs_nearest()
-        #
-        #     c0 = d0 + f0
-        #     c1 = d1 + f1
-        #
-        #     c0 = c0.rem(self.params.poly_mod)
-        #     c1 = c1.rem(self.params.poly_mod)
-        #
-        #     c0 = c0.wrap_coefs(q_l)
-        #     c1 = c1.wrap_coefs(q_l)
-        #
-        #     d('!!!', str(c0), debug_colours.FAIL)
-        #     d('!!!', str(c1), debug_colours.FAIL)
-
+        start = time.process_time()
         f0 = (self.ek[0] * d2).right_shift(self.params.logP)
         f1 = (self.ek[1] * d2).right_shift(self.params.logP)
 
         c0 = d0 + f0
         c1 = d1 + f1
+        d('time4', str(time.process_time() - start), debug_colours.BOLD)
 
+        start = time.process_time()
         c0 = c0.rem(self.params.poly_mod)
         c1 = c1.rem(self.params.poly_mod)
+        d('time5', str(time.process_time() - start), debug_colours.BOLD)
 
+        start = time.process_time()
         c0 = c0.wrap_coefs(q_l)
         c1 = c1.wrap_coefs(q_l)
+        d('time6', str(time.process_time() - start), debug_colours.BOLD)
 
         return Ciphertext(c0, c1, cipher1.l)
+
+    def mul_plain(self, cipher: Ciphertext, plain: Polynomial) -> Ciphertext:
+        start = time.process_time()
+        c0_new = cipher.c0 * plain
+        c1_new = cipher.c1 * plain
+        c0_new = c0_new.rem(self.params.poly_mod)
+        c1_new = c1_new.rem(self.params.poly_mod)
+
+        q_l = self.params.q_l(cipher.l)
+        c0_new = c0_new.wrap_coefs(q_l)
+        c1_new = c1_new.wrap_coefs(q_l)
+        d('time1', str(time.process_time() - start), debug_colours.BOLD)
+
+        return Ciphertext(c0_new, c1_new, cipher.l)
+
+    def add_plain(self, cipher: Ciphertext, plain: Polynomial) -> Ciphertext:
+        return Ciphertext(cipher.c0 + plain, cipher.c1, cipher.l)
 
     def square(self, cipher: Ciphertext):
         return self.mul(cipher, cipher)
@@ -400,8 +382,8 @@ class Evaluator:
         cipher.l += diff
 
 
-N = 16
-params = Params(N, p=30, p_0=130, L=5)
+N = 1024
+params = Params(N, p=30, p_0=40, L=5)
 
 print('Initialising scheme')
 encoder = Encoder(params)
@@ -413,31 +395,31 @@ encryptor = Encryptor(pk, params)
 decryptor = Decryptor(sk, params)
 evaluator = Evaluator(ek, params, encoder)
 
-p_raw = np.array([0.2, 0.5, .7, 0.4, 0.5, 0.4, 0.3, 0.99])
-d('main', 'Performing encryption of array: ' + str(p_raw), debug_colours.CYAN)
+p_raw = np.zeros(N // 2) + 0.6
+#p_raw = np.random.uniform(-1, 1, N // 2)
+
 p = encoder.encode(p_raw)
 p_enc = encryptor.encrypt(p)
 
-r_dec = decryptor.decrypt(p_enc)
-d('main', str(encoder.decode(r_dec)), debug_colours.CYAN)
+q_raw = np.array([0.1 * i for i in range(N // 2)])
+# q_raw = np.random.uniform(-3, 3, N // 2)
+# q_raw[0:100] = 0
 
-q_raw = np.array([1 * i for i in range(N // 2)])
-d('main', 'Performing encryption of array: ' + str(q_raw), debug_colours.CYAN)
 q = encoder.encode(q_raw)
-q_enc = encryptor.encrypt(q)
 
-r_dec = decryptor.decrypt(q_enc)
-d('main', str(encoder.decode(r_dec)), debug_colours.CYAN)
-
-for _ in range(5):
+for _ in range(3):
     d('main', 'Performing multiplication at level: ' + str(p_enc.l), debug_colours.CYAN)
     d('main', 'Modulus: ' + str(params.q_l(p_enc.l)), debug_colours.CYAN)
-    r_enc = evaluator.square(p_enc)
+    r_enc = evaluator.mul_plain(p_enc, q)
     evaluator.rescale(r_enc)
-    r_dec = decryptor.decrypt(r_enc)
-    d('main', str(encoder.decode(r_dec)), debug_colours.CYAN)
-    d('main', str(r_dec), debug_colours.BOLD)
     p_enc = r_enc
+
+    r_dec = decryptor.decrypt(r_enc)
+
+d('main', str(encoder.decode(r_dec)), debug_colours.CYAN)
+
+
+# d('main', str(r_dec), debug_colours.BOLD)
 
 
 # q_enc = encryptor.encrypt(q)

@@ -1,7 +1,7 @@
-from batched_real import BatchedReal
+from batched_real import HEReal
 from schemes import *
 
-class BatchedRealDouble(BatchedReal):
+class HERealDouble(HEReal):
     def __init__(self, v, scheme: SchemeCKKS):
         self.scheme = scheme
         self.length = scheme.slot_count()
@@ -13,48 +13,60 @@ class BatchedRealDouble(BatchedReal):
 
         self.num_slots = scheme.slot_count()
 
-    def add(self, batched_real):
-        cipher_new = self.scheme.add(self.ciphertext, batched_real.ciphertext)
-        return BatchedRealDouble(cipher_new, self.scheme)
+    def add(self, he_real):
+        cipher_new = self.scheme.add(self.ciphertext, he_real.ciphertext)
+        return HERealDouble(cipher_new, self.scheme)
 
-    def add_in_place(self, batched_real):
-        self.scheme.add_in_place(self.ciphertext, batched_real.ciphertext)
+    def add_raw(self, d: float):
+        cipher_new = self.scheme.add_raw(self.ciphertext, np.array([d] * self.length))
+        return HERealDouble(cipher_new, self.scheme)
+
+    def add_in_place(self, he_real):
+        self.scheme.add_in_place(self.ciphertext, he_real.ciphertext)
 
     def add_raw_in_place(self, d):
         self.scheme.add_raw_in_place(self.ciphertext, np.array([d] * self.length))
 
-    def multiply(self, batched_real):
-        cipher_new = self.scheme.multiply(self.ciphertext, batched_real.ciphertext)
-        return BatchedRealDouble(cipher_new, self.scheme)
+    def multiply(self, he_real):
+        cipher_new = self.scheme.multiply(self.ciphertext, he_real.ciphertext)
+        return HERealDouble(cipher_new, self.scheme)
 
     def multiply_raw(self, d):
-        cipher_new = self.scheme.multiply_raw(self.ciphertext, np.array([d] * self.length))
-        return BatchedRealDouble(cipher_new, self.scheme)
+        if isinstance(d, List):
+            vals = np.array(d + [0 for _ in range(self.length - len(d))])
+        else:
+            vals = np.array([d] * self.length)
+        cipher_new = self.scheme.multiply_raw(self.ciphertext, vals)
+        return HERealDouble(cipher_new, self.scheme)
 
-    def multiply_in_place(self, batched_real):
-        self.scheme.multiply_in_place(self.ciphertext, batched_real.ciphertext)
+    def multiply_in_place(self, he_real):
+        self.scheme.multiply_in_place(self.ciphertext, he_real.ciphertext)
+
+    def multiply_raw_in_place(self, d):
+        if isinstance(d, List):
+            vals = np.array(d + [0 for _ in range(self.length - len(d))])
+        else:
+            vals = np.array([d] * self.length)
+
+        self.scheme.multiply_raw_in_place(self.ciphertext, vals)
 
     def square(self):
         cipher_new = self.scheme.square(self.ciphertext)
-        return BatchedRealDouble(cipher_new, self.scheme)
+        return HERealDouble(cipher_new, self.scheme)
 
     def square_in_place(self):
         self.scheme.square_in_place(self.ciphertext)
 
-    def sum(self):
+    def sum(self, n):
         total = self.scheme.encrypt(np.array([0]))
 
-        for i in range(self.length):
-            self.scheme.rotate_in_place(total, 1)
+        for i in range(n):
             self.scheme.add_in_place(total, self.ciphertext)
-
-        self.scheme.rotate_in_place(self.ciphertext, self.scheme.slot_count() // 2 - 2 * self.length)
-
-        for i in range(self.length):
             self.scheme.rotate_in_place(self.ciphertext, 1)
-            self.scheme.add_in_place(total, self.ciphertext)
 
-        return BatchedRealDouble(total, self.scheme)
+        self.scheme.rotate_in_place(self.ciphertext, -n)
+
+        return HERealDouble(total, self.scheme)
 
     def relinearise(self):
         self.scheme.relinearise(self.ciphertext)
@@ -72,3 +84,13 @@ class BatchedRealDouble(BatchedReal):
 
     def noise(self):
         self.scheme.evaluate_ciphertext(self.ciphertext)
+
+    def slot_count(self):
+        return self.scheme.slot_count()
+
+    def zeros(self):
+        v = [0 for _ in range(self.slot_count())]
+        return HERealDouble(v, self.scheme)
+
+    def rot(self, n: int):
+        return self.scheme.rotate(self.ciphertext, -n)

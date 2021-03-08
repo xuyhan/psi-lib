@@ -1,20 +1,26 @@
-class BatchedReal:
-    def add(self, batched_real):
+class HEReal:
+    def add(self, he_real):
+        pass
+
+    def add_raw(self, raw: float):
         pass
 
     def add_raw_in_place(self, raw: float):
         pass
 
-    def add_in_place(self, batched_real):
+    def add_in_place(self, he_real):
         pass
 
-    def multiply(self, batched_real):
+    def multiply(self, he_real):
         pass
 
-    def multiply_raw(self, real: float):
+    def multiply_raw(self, real):
         pass
 
-    def multiply_in_place(self, batched_real):
+    def multiply_raw_in_place(self, real):
+        pass
+
+    def multiply_in_place(self, he_real):
         pass
 
     def square(self):
@@ -23,7 +29,7 @@ class BatchedReal:
     def square_in_place(self):
         pass
 
-    def sum(self):
+    def sum(self, n: int):
         pass
 
     def relinearise(self):
@@ -33,4 +39,13 @@ class BatchedReal:
         pass
 
     def noise(self):
+        pass
+
+    def slot_count(self):
+        pass
+
+    def zeros(self):
+        pass
+
+    def rot(self, n: int):
         pass

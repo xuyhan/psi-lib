@@ -1,13 +1,14 @@
 from typing import List
-from multiprocessing import Pool
-from batched_real import BatchedReal
-from batched_real_integer import BatchedRealInteger
 
 import numpy as np
+from tqdm import tqdm
+
+from batched_real import HEReal
+
 
 class BatchedRealVec:
-    def __init__(self, data: List[BatchedReal]):
-        self.data = data
+    def __init__(self, data: List[HEReal]):
+        self.data = list(data)
 
     def len(self):
         return len(self.data)
@@ -16,19 +17,19 @@ class BatchedRealVec:
         for batched_real in self.data:
             batched_real.relinearise()
 
-    def set_element(self, i, batched_real: BatchedReal):
+    def set_element(self, i, batched_real: HEReal):
         self.data[i] = batched_real
 
-    def element(self, i: int) -> BatchedReal:
+    def element(self, i: int) -> HEReal:
         return self.data[i]
 
     def subregion(self, i, j):
         return BatchedRealVec(self.data[i: j])
 
-    def append(self, batched_real: BatchedReal):
+    def append(self, batched_real: HEReal):
         self.data.append(batched_real)
 
-    def prepend(self, batched_real: BatchedReal):
+    def prepend(self, batched_real: HEReal):
         self.data = [batched_real] + self.data
 
     def extend(self, batched_real_vec):
@@ -40,6 +41,15 @@ class BatchedRealVec:
         new_data = []
         for i in range(len(self.data)):
             new_data.append(self.data[i].add(batched_real_vec.data[i]))
+
+        return BatchedRealVec(new_data)
+
+    def add_raw(self, vec_raw: np.ndarray):
+        self.__vec_raw_check(vec_raw)
+
+        new_data = []
+        for i in range(len(self.data)):
+            new_data.append(self.data[i].add_raw(vec_raw[i]))
 
         return BatchedRealVec(new_data)
 
@@ -67,6 +77,10 @@ class BatchedRealVec:
         new_data = [self.data[i].multiply_raw(vec_raw[i]) for i in range(len(self.data))]
         return BatchedRealVec(new_data)
 
+    def hadamard_mult_plain_in_place(self, vec_raw):
+        self.__vec_raw_check(vec_raw)
+        [self.data[i].multiply_raw_in_place(vec_raw[i]) for i in range(len(self.data))]
+
     def square(self):
         new_data = np.array([self.data[i].square() for i in range(len(self.data))])
         return BatchedRealVec(new_data)
@@ -92,7 +106,6 @@ class BatchedRealVec:
 
     def dot_plain(self, vec_raw):
         self.__vec_raw_check(vec_raw)
-
         return self.multiply_element_wise_plain(vec_raw).get_sum()
 
     def __vec_enc_check(self, batched_real_vec):
@@ -103,8 +116,20 @@ class BatchedRealVec:
         if self.len() != vec_raw.shape[0]:
             raise Exception("Length mismatch: %s != %s" % (len(self.data), len(vec_raw)))
 
-class BatchedRealMat:
-    def __init__(self, data: List[BatchedRealVec]):
+class HETensor:
+    def __init__(self, data):
+        if isinstance(data, np.ndarray):
+            if data.ndim == 1:
+                self.data = [BatchedRealVec(data)]
+            elif data.ndim == 2:
+                self.data = [BatchedRealVec(row) for row in data]
+            else:
+                raise Exception('Tensors with dim > 2 not supported in current version.')
+            return
+
+        '''
+        Treating data as List[BatchedRealVec]
+        '''
         self.data = data
 
     @staticmethod
@@ -112,7 +137,7 @@ class BatchedRealMat:
         data_updated = []
         for row in data:
             data_updated.append(BatchedRealVec(row))
-        return BatchedRealMat(data_updated)
+        return HETensor(data_updated)
 
     def relinearise(self):
         for row in self.data:
@@ -121,10 +146,10 @@ class BatchedRealMat:
     def shape(self):
         return len(self.data), self.data[0].len()
 
-    def set_element(self, i: int, j: int, batched_real: BatchedReal):
+    def set_element(self, i: int, j: int, batched_real: HEReal):
         self.data[i].set_element(j, batched_real)
 
-    def element(self, i: int, j: int) -> BatchedReal:
+    def element(self, i: int, j: int) -> HEReal:
         return self.data[i].element(j)
 
     def row(self, i: int) -> BatchedRealVec:
@@ -134,14 +159,14 @@ class BatchedRealMat:
         vec_data = [self.element(j, i) for j in range(self.shape()[0])]
         return BatchedRealVec(vec_data)
 
-    def set_element(self, row: int, col: int, val: BatchedReal):
+    def set_element(self, row: int, col: int, val: HEReal):
         self.data[row].set_element(col, val)
 
     def subregion(self, r_start, r_end, c_start, c_end):
         data_subregion = []
         for vec in self.data[r_start: r_end]:
             data_subregion.append(vec.subregion(c_start, c_end))
-        return BatchedRealMat(data_subregion)
+        return HETensor(data_subregion)
 
     def add(self, real_mat):
         if self.shape() != real_mat.shape():
@@ -151,7 +176,7 @@ class BatchedRealMat:
         for i in range(self.shape()[0]):
             new_data.append(self.data[i].add(real_mat.data[i]))
 
-        return BatchedRealMat(new_data)
+        return HETensor(new_data)
 
     def add_in_place(self, real_mat):
         if self.shape() != real_mat.shape():
@@ -177,7 +202,7 @@ class BatchedRealMat:
         result = np.array(result)
         result = result.reshape(1, -1)[0]
         vec = BatchedRealVec(list(result))
-        return BatchedRealMat([vec])
+        return HETensor([vec])
 
     def square_in_place(self):
         for vec in self.data:
@@ -194,7 +219,7 @@ class BatchedRealMat:
                 col_b = real_mat.col(j)
                 row_new[j] = row_a.dot(col_b)
             data_new.append(BatchedRealVec(row_new))
-        return BatchedRealMat(data_new)
+        return HETensor(data_new)
 
     def mult_plain(self, raw_mat: np.ndarray, multiprocessing=False, debug=False):
         if self.shape()[1] != raw_mat.shape[0]:
@@ -203,13 +228,8 @@ class BatchedRealMat:
         shape_a = self.shape()
         shape_b = raw_mat.shape
 
-        pool = Pool(processes=12)
-
-        if debug:
-            print('Starting matrix multiplication...')
-
-            total_steps = shape_a[0] * shape_b[1]
-            progress_step = total_steps // 10
+        total = shape_a[0] * shape_b[1]
+        bar = tqdm(total=total)
 
         for i in range(shape_a[0]):
             row_a = self.row(i)
@@ -220,14 +240,13 @@ class BatchedRealMat:
 
             for j in range(shape_b[1]):
                 row_new[j] = parallel_func(j)
-
-                progress = i * shape_a[0] + j
-                if debug and progress % progress_step == 0:
-                    print('Progress: %.2f' % (progress / total_steps))
+                bar.update(1)
 
             data_new.append(BatchedRealVec(row_new))
 
-        return BatchedRealMat(data_new)
+        bar.close()
+
+        return HETensor(data_new)
 
     # def pad_in_place(self):
     #     old_h, old_w = self.shape()
@@ -245,7 +264,7 @@ class BatchedRealMat:
             for i in range(self.shape()[0]):
                 row_data.append(self.row(i).element(j))
             data.append(BatchedRealVec(data=row_data))
-        return BatchedRealMat(data)
+        return HETensor(data)
 
     def column_concat(self, batched_real_mat):
         if self.shape()[0] != batched_real_mat.shape()[0]:
