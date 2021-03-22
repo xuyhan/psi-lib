@@ -11,6 +11,7 @@ import math
 import time
 
 import low_lat
+from logger import debug, debug_colours
 
 class Layer:
     def __init__(self, input_shape, output_shape):
@@ -61,6 +62,7 @@ class ConvLayer(Layer):
         self.stride = stride
         self.padding = padding
         self.num_maps = num_maps
+        self.dense_mode = False
 
         super().__init__(input_shape=None, output_shape=None)
 
@@ -102,30 +104,33 @@ class ConvLayer(Layer):
     def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
         print(self.description())
 
-        out = []
+        if not self.dense_mode:
+            out = []
 
-        pbar = tqdm(total=self.weights.shape[-1] * self.weights.shape[-2])
+            for j in tqdm(range(self.weights.shape[-1])):
+                fm_out = None
 
-        for j in range(self.weights.shape[-1]):
-            fm_out = None
+                for i, t in enumerate(input_data):
+                    kernel = self.weights[:, :, i, j]
 
-            for i, t in enumerate(input_data):
-                kernel = self.weights[:, :, i, j]
+                    t_detach = t.detatch()[0]
 
-                if fm_out is None:
-                    fm_out = low_lat.convolve(t, kernel)
-                else:
-                    fm_out.add_in_place(low_lat.convolve(t, kernel))
+                    if fm_out is None:
+                        fm_out = low_lat.convolve(t_detach, kernel)
+                    else:
+                        fm_out.add_in_place(low_lat.convolve(t_detach, kernel))
 
-                pbar.update(1)
+                    fm_out.add_raw_in_place(self.biases[i])
 
-            out.append(fm_out)
+                out.append(fm_out)
 
-        pbar.close()
-        exit(0)
+            return [HETensor(np.array(out))]
 
-        return out
-
+        # for j in tqdm(range(self.weights.shape[-1])):
+        #     for i, t in enumerate(input_data):
+        #         kernel = self.weights[:, :, i, j]
+        #         W = low_lat.conv_weights(d_in=self.input_shape[-1], kernel=kernel, s=self.stride)
+        #
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print(self.description())
@@ -185,8 +190,9 @@ def AveragePooling(Layer):
 
 
 class Flatten(Layer):
-    def __init__(self):
+    def __init__(self, groups=1):
         super().__init__(input_shape=None, output_shape=None)
+        self.groups = groups
 
     def description(self):
         return 'Flatten layer, input shape = {}, output shape = {}'.format(self.input_shape, self.output_shape)
@@ -197,6 +203,25 @@ class Flatten(Layer):
         for i in range(1, len(input_shape)):
             k *= max(1, input_shape[i])
         self.output_shape = (1, 1, k)
+
+    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+        print(self.description())
+
+        n = self.input_shape[-1] * self.input_shape[-2]
+        messages = input_data[0].detatch()[0]
+        out = []
+
+        cpg = self.input_shape[0] // self.groups  # channels per group
+        sgs = n * cpg  # split group size
+
+        debug('Flatten::apply_fast', 'channels per group: ' + str(cpg), debug_colours.GREEN)
+        debug('Flatten::apply_fast', 'group size: ' + str(sgs), debug_colours.GREEN)
+
+        for i in range(self.groups):
+            gr = low_lat.concat(messages[i * cpg: (i + 1) * cpg], n)
+            out.append(gr)
+
+        return [HETensor(np.array(out))]
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print('-----Applying flatten layer-----')
@@ -216,7 +241,8 @@ class DenseLayer(Layer):
 
     def configure_input(self, input_shape):
         if input_shape[0] > 1 or input_shape[1] > 1:
-            raise Exception('Dense layer can only take flattened input. Received ' + str(input_shape))
+            raise Exception('Dense layer should take flattened input. Received ' + str(input_shape))
+
         self.input_shape = input_shape
 
     def load_weights(self, weights: np.ndarray, extra: np.ndarray):
@@ -230,6 +256,40 @@ class DenseLayer(Layer):
                 'Expected to have bias weights of dimension %s, received %s' % (expected_extra, extra.shape))
         self.weights = weights
         self.biases = extra
+
+    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+        print(self.description())
+
+        # flattened case
+        # real = input_data[0].detatch()[0, 0]
+        # W = self.weights.transpose((1, 0))
+        #
+        # out = low_lat.dense_to_dense(real, W)
+        # #out = low_lat.dense_to_sparse(real, W)
+        # #out.add_raw_in_place(list(self.biases))
+        #
+        # return [HETensor(out)]
+
+        # # split input case
+        debug('DenseLayer::apply_fast', 'split_input mode on', debug_colours.GREEN)
+
+        groups = input_data[0].detatch()[0]
+        sgs = self.input_shape[-1] // len(groups)
+
+        debug('DenseLayer::apply_fast', 'group size: ' + str(sgs), debug_colours.GREEN)
+
+        result = None
+
+        for i, t in enumerate(groups):
+            W = self.weights.transpose((1, 0))[:, i * sgs: (i + 1) * sgs]
+            o = low_lat.dense_to_dense(t, W)
+
+            if result is None:
+                result = o
+            else:
+                result.add_in_place(o)
+
+        return [HETensor(result)]
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         print('-----Applying dense layer-----')
@@ -252,7 +312,7 @@ class ActivationLayer(Layer):
         self.output_shape = input_shape
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
-        print('-----Applying activation layer-----')
+        print(self.description())
 
         if self.mode == 'square':
             for layer in input_data:
@@ -260,6 +320,8 @@ class ActivationLayer(Layer):
 
         return input_data
 
+    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+        return self.apply(input_data)
 
 class Model:
     def __init__(self, creator):
@@ -283,24 +345,17 @@ class Model:
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-x))
 
-    def predict(self, input_data, creator: Creator, length: int):
+    def predict(self, input_data, creator: Creator, classes: int):
         if isinstance(input_data, HETensor):
             input_data = [input_data]
 
         output_data = self.apply(input_data)[0]
 
-        decrypted = np.array(creator.debug(output_data, length))
+        decrypted = np.array(creator.debug(output_data, classes))
 
-        predictions = []
-        outputs = []
+        vals = decrypted[0, 0, :]
 
-        for i in range(length):
-            vals = decrypted[:, :, i][0]
-
-            predictions.append(np.argmax(vals))
-            outputs.append(vals)
-
-        return predictions, outputs
+        return np.argmax(vals), vals
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         if not self.compiled:
@@ -418,7 +473,7 @@ def mnist():
 
     model = Model(creator)
     model.add(InputLayer(input_shape=(1, 28, 28)))
-    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=50))
+    model.add(ConvLayer(kernel_size=(4, 4), stride=3, padding=0, num_maps=50))
     model.add(ActivationLayer(mode='square'))
     model.add(Flatten())
     model.add(DenseLayer(output_length=32))
@@ -445,38 +500,43 @@ def mnist():
 
 
 def mnist_fast():
-    N = 8192
-    scheme = get_ckks_scheme(512 * 16 * 2)
+    scheme = get_ckks_scheme(512 * 16 * 2 * 1, g_keys=[8192*2+1])
 
     creator = Creator(scheme)
     scheme.summary()
 
     model = Model(creator)
     model.add(InputLayer(input_shape=(1, 28, 28)))
-    model.add(ConvLayer(kernel_size=(4, 4), stride=2, padding=0, num_maps=50))
+    model.add(ConvLayer(kernel_size=(3, 3), stride=1, padding=0, num_maps=66))
     model.add(ActivationLayer(mode='square'))
-    model.add(Flatten())
+    model.add(Flatten(groups=11))
     model.add(DenseLayer(output_length=32))
-    model.add(Flatten())
+    model.add(ActivationLayer(mode='square'))
     model.add(DenseLayer(output_length=10))
 
     weights, test_features, preds_base, outputs_base = load_data(name='MNIST')
-
-    image = test_features[0]
-    preds_base = preds_base[0]
-    outputs_base = outputs_base[0]
 
     model.compile(data_mode=1)
     model.load_weights(weights, scale=16)
     model.summary()
 
-    data = creator.encrypt_dense(mat=image)
-    img_groups = creator.obtain_image_groups(mat=image, k=4, s=2)
+    for i in range(1):
+        image = test_features[i]
+        preds_base_i = preds_base[i]
+        outputs_base_i = outputs_base[i]
 
-    preds_new, _ = model.predict(input_data=img_groups,
-                                 creator=creator,
-                                 length=N)
-    
+        data = creator.encrypt_dense(mat=image)
+        img_groups = creator.obtain_image_groups(mat=image, k=3, s=1)
+
+        pred_new, outputs = model.predict(input_data=img_groups,
+                                     creator=creator,
+                                     classes=10)
+
+        debug('mnist_fast', str(outputs), debug_colours.GREEN)
+
+        print(pred_new)
+        print(preds_base_i)
+        print(outputs_base_i)
 
 if __name__ == '__main__':
     mnist_fast()

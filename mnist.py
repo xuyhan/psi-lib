@@ -49,20 +49,16 @@ def identity(x):
 # define cnn model
 def define_model():
     model = Sequential()
-    model.add(Conv2D(32, (4, 4), strides=2))
+    model.add(Conv2D(66, (3, 3), strides=1))
     model.add(Activation(square_activation))
-
     model.add(Flatten())
-
     model.add(Dense(32))
     model.add(Activation(square_activation))
-
     model.add(Dense(10, activation='softmax'))
 
     opt = Adam(lr=0.002)
     model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
     return model
-
 
 trainX, trainY, testX, testY = load_dataset_mnist()
 trainX, testX = prep_pixels(trainX, testX)
@@ -73,7 +69,7 @@ model = define_model()
 model.fit(
     trainX,
     trainY,
-    epochs=3,
+    epochs=8,
     validation_data=(testX, testY),
     workers=6
 )
@@ -94,7 +90,7 @@ def save_keras_weights(model, path):
     w = [[None, None]]
 
     flatten = False
-    channels_last = None
+    channels_last = 1
 
     for layer in model.layers:
         if layer.name.startswith('activation'):

@@ -66,7 +66,7 @@ def test_matrix_mult():
     print("Non-HE rfgesult:")
     print(mat_a_plain + mat_b_plain)
     print("HE result:")
-    print(decrypt_real_mat(mat_a_enc.add(mat_b_enc)))
+    print(decrypt_real_mat(mat_a_enc._add_ip(mat_b_enc)))
 
     mat_a_plain = np.random.rand(30, 6)
     mat_b_plain = np.random.rand(6, 30)
@@ -77,7 +77,7 @@ def test_matrix_mult():
     print("Non-HE result:")
     print(np.matmul(mat_a_plain, mat_b_plain))
     print("HE result:")
-    print(decrypt_real_mat(mat_a_enc.mult(mat_b_enc)))
+    print(decrypt_real_mat(mat_a_enc._mult(mat_b_enc)))
 
 
 
@@ -179,7 +179,7 @@ def matrx_mult():
     start_time = time.time()
     batched_mat1 = BatchedMat(mat1, scale=s, shape=mat1.shape)
     batched_mat2 = BatchedMat(mat2, scale=s, shape=mat2.shape)
-    b = batched_mat1.mult(batched_mat2).debug()
+    b = batched_mat1._mult(batched_mat2).debug()
     print("--- Took %s seconds ---" % (time.time() - start_time))
     error(a, b)
 

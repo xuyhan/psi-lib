@@ -81,7 +81,7 @@ class Scheme(SchemeBase):
 
 
 class SchemeCKKS(Scheme):
-    def __init__(self, poly_modulus_degree):
+    def __init__(self, poly_modulus_degree, g_keys):
         parms = EncryptionParameters(scheme_type.CKKS)
         parms.set_poly_modulus_degree(poly_modulus_degree)
         parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, [60,40,40,40,40,40,40,60]))
@@ -100,6 +100,7 @@ class SchemeCKKS(Scheme):
 
         self.relin_keys = keygen.relin_keys()
         self.gal_keys = keygen.galois_keys()
+        self.gal_keys_s = keygen.galois_keys(uIntVector(g_keys))
 
         self.default_scale = 2.0 ** 40
 
@@ -244,6 +245,10 @@ class SchemeCKKS(Scheme):
     def relinearise(self, cipher: Ciphertext):
         self.evaluator.relinearize_inplace(cipher, self.relin_keys)
 
+    def perm(self, cipher: Ciphertext, elt: int):
+        ciphertext_perm = Ciphertext()
+        self.evaluator.apply_galois(cipher, elt, self.gal_keys_s, ciphertext_perm)
+        return ciphertext_perm
 
 class SchemeBFV(Scheme):
     def __init__(self, poly_modulus_degree, plain_modulus_bits):
@@ -458,8 +463,8 @@ def get_bfv_scheme(poly_mods, plaintext_mods, scale, default_weight_scale):
     )
     return scheme
 
-def get_ckks_scheme(poly_mods):
+def get_ckks_scheme(poly_mods, g_keys=[]):
     scheme = SchemeCKKS(
-        poly_mods
+        poly_mods, g_keys
     )
     return scheme

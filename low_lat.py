@@ -1,9 +1,11 @@
 import math
 from typing import List
+from tqdm import tqdm
 
 import numpy as np
 
 from batched_real import HEReal
+from logger import debug, debug_colours
 
 def _rotate(v: HEReal, n):
     return v.rot(n)
@@ -46,6 +48,21 @@ def shift_sum(v: HEReal, n: int):
         _add_ip(result, _rotate(v, -n))
     return result
 
+def rot_sum(v: HEReal, n: int, m: int):
+    """
+    @param v: ciphertext
+    @param n: output size, must be power of 2
+    @param m: input size, must be power of 2
+    @return: the sum
+    """
+    t = m
+
+    result = v
+    while t > n:
+        t = t // 2
+        _add_ip(result, _rotate(v, -t))
+    return result
+
 def permute(v, p):
     assert(len(v) == len(p))
     result = [0 for _ in range(len(v))]
@@ -81,11 +98,89 @@ def dense_to_sparse(message: HEReal, W: np.ndarray) -> List[HEReal]:
     @param W: weight matrix of dimension (d_out, d_in)
     """
     result = []
-    for i in range(W.shape[0]):
+    for i in tqdm(range(W.shape[0])):
         t = _mult(message, W[i])
         t = shift_sum(t, W.shape[1])
         result.append(t)
     return result
+
+def sparse_to_dense(messages: List[HEReal], i, o) -> HEReal:
+    """
+    @param messages: list of ciphertexts
+    @param i: original length
+    @param o: output length
+    """
+    result = _zeros(messages[0])
+
+def dense_to_dense(message: HEReal, W: np.ndarray) -> HEReal:
+    """
+    @param message: ciphertext
+    @param W: weight matrix of dimension (d_out, d_in)
+    @param n_in: number of nodes in previous layer
+    """
+
+    # import matplotlib.pyplot as plt
+    # t = np.reshape(message.debug(length=28 * 28), (28, 28))
+    # plt.imshow(t)
+    # plt.show()
+
+    if W.shape[1] <= W.shape[0]:
+        raise Exception('dense to dense only works if mapping to smaller number of nodes')
+
+    #debug('low_lat::dense_to_dense', 'slots: ' + str(message.slot_count()), debug_colours.CYAN)
+
+    n_out = W.shape[0]
+    n_in = W.shape[1]
+
+    #debug('low_lat::dense_to_dense', 'out, in: ' + str(W.shape), debug_colours.CYAN)
+
+    n_in_ = 2 ** int(math.ceil(math.log2(n_in)))
+    n_out_ = 2 ** int(math.ceil(math.log2(n_out)))
+
+    if n_in_ > message.slot_count() // 2:
+        raise Exception('input size too large')
+
+    W_ = np.copy(W)
+
+    W_ = np.row_stack((W_, np.zeros((n_out_ - n_out, n_in))))
+    W_ = np.column_stack((W_, np.zeros((n_out_, n_in_ - n_in))))
+
+    #debug('low_lat::dense_to_dense', 'out_, in_: ' + str(W_.shape), debug_colours.CYAN)
+
+    _add_ip(message, _rotate(message, -n_in_))
+
+    result = None
+
+    for i in tqdm(range(n_out_)):
+        row = [W_[(i + j) % n_out_, j] for j in range(n_in_)]
+        right_shift = 0 if i == 0 else n_out_ + i
+        row = row[-right_shift:] + row[:-right_shift]
+
+        t = _mult(_rotate(message, right_shift), row)
+
+        if result is None:
+            result = t
+        else:
+            _add_ip(result, t)
+
+    #debug('low_lat::dense_to_dense', str(n_in_ // n_out_), debug_colours.CYAN)
+
+    r = rot_sum(result, n_out_, n_in_)
+    # import matplotlib.pyplot as plt
+    # t = np.reshape(r.debug(length=32 * 32), (32, 32))
+    # plt.imshow(t)
+    # plt.show()
+
+    return r
+
+
+
+
+
+
+
+
+
 
 def find_groups(fm, k, s):
     """

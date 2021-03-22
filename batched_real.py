@@ -49,3 +49,6 @@ class HEReal:
 
     def rot(self, n: int):
         pass
+
+    def perm(self, elt: int):
+        pass

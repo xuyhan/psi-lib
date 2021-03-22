@@ -25,7 +25,12 @@ class HERealDouble(HEReal):
         self.scheme.add_in_place(self.ciphertext, he_real.ciphertext)
 
     def add_raw_in_place(self, d):
-        self.scheme.add_raw_in_place(self.ciphertext, np.array([d] * self.length))
+        if isinstance(d, List):
+            vals = np.array(d + [0 for _ in range(self.length - len(d))])
+        else:
+            vals = np.array([d] * self.length)
+
+        self.scheme.add_raw_in_place(self.ciphertext, vals)
 
     def multiply(self, he_real):
         cipher_new = self.scheme.multiply(self.ciphertext, he_real.ciphertext)
@@ -93,4 +98,7 @@ class HERealDouble(HEReal):
         return HERealDouble(v, self.scheme)
 
     def rot(self, n: int):
-        return self.scheme.rotate(self.ciphertext, -n)
+        return HERealDouble(self.scheme.rotate(self.ciphertext, -n), self.scheme)
+
+    def perm(self, elt: int):
+        return HERealDouble(self.scheme.perm(self.ciphertext, elt), self.scheme)

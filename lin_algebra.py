@@ -118,6 +118,10 @@ class BatchedRealVec:
 
 class HETensor:
     def __init__(self, data):
+        if isinstance(data, HEReal):
+            self.data = [BatchedRealVec([data])]
+            return
+
         if isinstance(data, np.ndarray):
             if data.ndim == 1:
                 self.data = [BatchedRealVec(data)]
@@ -138,6 +142,14 @@ class HETensor:
         for row in data:
             data_updated.append(BatchedRealVec(row))
         return HETensor(data_updated)
+
+    def detatch(self) -> np.ndarray:
+        shape = self.shape()
+        out = np.zeros(shape, dtype=object)
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                out[i][j] = self.element(i, j)
+        return out
 
     def relinearise(self):
         for row in self.data:

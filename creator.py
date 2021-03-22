@@ -53,6 +53,7 @@ class Creator:
 
     def obtain_image_groups(self, mat: np.ndarray, k: int, s: int) -> np.ndarray:
         result = []
+
         for c in range(mat.shape[2]):
             fm = mat[:, :, c]
 
@@ -61,7 +62,9 @@ class Creator:
                 gs.append(self.encrypt_value(g))
             result.append(gs)
 
-        return result
+        result = np.array(result)
+
+        return HETensor(result)
 
     def zero(self, batched_real=None):
         if isinstance(self.scheme, CRTScheme):
@@ -86,15 +89,15 @@ class Creator:
             data.append(self.zero_vec(num_cols, batched_real))
         return HETensor(data)
 
-    def debug(self, batched_real_mat: HETensor, length: int) -> np.ndarray:
-        num_rows, num_cols = batched_real_mat.shape()
+    def debug(self, he_tensor: HETensor, length: int) -> np.ndarray:
+        num_rows, num_cols = he_tensor.shape()
 
         result = []
 
         for i in range(num_rows):
             row = []
             for j in range(num_cols):
-                row.append(batched_real_mat.element(i, j).debug(length))
+                row.append(he_tensor.element(i, j).debug(length))
             result.append(row)
 
         return np.array(result)
