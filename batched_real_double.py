@@ -59,8 +59,8 @@ class HERealDouble(HEReal):
         cipher_new = self.scheme.square(self.ciphertext)
         return HERealDouble(cipher_new, self.scheme)
 
-    def square_in_place(self):
-        self.scheme.square_in_place(self.ciphertext)
+    def square_in_place(self, flag=False):
+        self.scheme.square_in_place(self.ciphertext, flag)
 
     def sum(self, n):
         total = self.scheme.encrypt(np.array([0]))

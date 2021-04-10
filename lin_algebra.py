@@ -143,7 +143,7 @@ class HETensor:
             data_updated.append(BatchedRealVec(row))
         return HETensor(data_updated)
 
-    def detatch(self) -> np.ndarray:
+    def detach(self) -> np.ndarray:
         shape = self.shape()
         out = np.zeros(shape, dtype=object)
         for i in range(shape[0]):
@@ -219,6 +219,11 @@ class HETensor:
     def square_in_place(self):
         for vec in self.data:
             vec.square_in_place()
+
+    def scale(self, s):
+        for i in range(self.shape()[0]):
+            for j in range(self.shape()[1]):
+                self.element(i, j).multiply_raw_in_place(s)
 
     def mult(self, real_mat):
         if self.shape()[1] != real_mat.shape()[0]:

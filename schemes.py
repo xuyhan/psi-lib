@@ -81,10 +81,11 @@ class Scheme(SchemeBase):
 
 
 class SchemeCKKS(Scheme):
-    def __init__(self, poly_modulus_degree, g_keys):
+    def __init__(self, poly_modulus_degree, primes, scale_factor):
         parms = EncryptionParameters(scheme_type.CKKS)
         parms.set_poly_modulus_degree(poly_modulus_degree)
-        parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, [60,40,40,40,40,40,40,60]))
+        # base leve
+        parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, primes))
 
         context = SEALContext.Create(parms)
 
@@ -100,9 +101,9 @@ class SchemeCKKS(Scheme):
 
         self.relin_keys = keygen.relin_keys()
         self.gal_keys = keygen.galois_keys()
-        self.gal_keys_s = keygen.galois_keys(uIntVector(g_keys))
+        #self.gal_keys_s = keygen.galois_keys(uIntVector(g_keys))
 
-        self.default_scale = 2.0 ** 40
+        self.default_scale = 2.0 ** scale_factor
 
     def mod_switch(self, ciphertext_a: Ciphertext, to_switch):
         self.evaluator.mod_switch_to_inplace(to_switch, ciphertext_a.parms_id())
@@ -213,17 +214,17 @@ class SchemeCKKS(Scheme):
     def square(self, cipher_a: Ciphertext) -> Ciphertext:
         cipher_new = Ciphertext()
         self.evaluator.square(cipher_a, cipher_new)
-
+        self.evaluator.relinearize_inplace(cipher_new, self.relin_keys)
         self.evaluator.rescale_to_next_inplace(cipher_new)
         cipher_new.scale(self.default_scale)
 
         return cipher_new
 
-    def square_in_place(self, cipher_a: Ciphertext):
+    def square_in_place(self, cipher_a: Ciphertext, flag):
         self.evaluator.square_inplace(cipher_a)
+
         self.evaluator.relinearize_inplace(cipher_a, self.relin_keys)
         self.evaluator.rescale_to_next_inplace(cipher_a)
-
         cipher_a.scale(self.default_scale)
 
     def slot_count(self):
@@ -463,8 +464,8 @@ def get_bfv_scheme(poly_mods, plaintext_mods, scale, default_weight_scale):
     )
     return scheme
 
-def get_ckks_scheme(poly_mods, g_keys=[]):
+def get_ckks_scheme(poly_mods, primes, scale_factor):
     scheme = SchemeCKKS(
-        poly_mods, g_keys
+        poly_mods, primes, scale_factor
     )
     return scheme

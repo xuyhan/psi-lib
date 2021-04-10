@@ -51,8 +51,8 @@ def shift_sum(v: HEReal, n: int):
 def rot_sum(v: HEReal, n: int, m: int):
     """
     @param v: ciphertext
-    @param n: output size, must be power of 2
-    @param m: input size, must be power of 2
+    @param n: output size
+    @param m: input size, require that m is n * 2^k for some k
     @return: the sum
     """
     t = m
@@ -61,6 +61,7 @@ def rot_sum(v: HEReal, n: int, m: int):
     while t > n:
         t = t // 2
         _add_ip(result, _rotate(v, -t))
+
     return result
 
 def permute(v, p):
@@ -77,20 +78,40 @@ def concat(messages: List[HEReal], n: int) -> HEReal:
         _add_ip(m0, t)
     return m0
 
-def convolve(conv: List[HEReal], kernel) -> HEReal:
+def unconcat(message: HEReal, length: int, n: int) -> List[HEReal]:
+    if length % n != 0:
+        raise Exception('Cannot unconcat %s to %s' %(length, n))
+
+    messages = []
+
+    for i in range(length // n):
+        messages.append(_rotate(message, - i * n))
+
+    return messages
+
+def convolve3D(conv: List[HEReal], d_out: int, filter) -> (HEReal, int, int):
     """
-    @param conv: list of regions
-    @param kernel: kernel, as 2D numpy array
+    @param conv: list of regions, expect each to be flattened in order of channel, d, d
+    @param filter: set of kernels, expect to be of (channel, k, k)
     """
+    if len(filter.shape) != 3:
+        raise Exception('Expected 3D filter.')
+
     result = None
-    kernel_flat = kernel.flatten()
-    for i in range(kernel.shape[0] * kernel.shape[1]):
-        p = _mult_const(conv[i], kernel_flat[i])
+    kernel_flat = filter.flatten()
+    mults = 0
+    adds = 0
+    for i in range(kernel_flat.shape[0]):
+        c = [kernel_flat[i] for _ in range(d_out ** 2)]
+        p = _mult_const(conv[i], c)
+        mults += 1
         if result is None:
             result = p
         else:
             _add_ip(result, p)
-    return result
+            adds += 1
+
+    return result, mults, adds
 
 def dense_to_sparse(message: HEReal, W: np.ndarray) -> List[HEReal]:
     """
@@ -119,68 +140,46 @@ def dense_to_dense(message: HEReal, W: np.ndarray) -> HEReal:
     @param n_in: number of nodes in previous layer
     """
 
-    # import matplotlib.pyplot as plt
-    # t = np.reshape(message.debug(length=28 * 28), (28, 28))
-    # plt.imshow(t)
-    # plt.show()
+    # if W.shape[0] == 10:
+    #     np.save('256inputs.npy', message.debug(8192))
 
     if W.shape[1] <= W.shape[0]:
         raise Exception('dense to dense only works if mapping to smaller number of nodes')
 
-    #debug('low_lat::dense_to_dense', 'slots: ' + str(message.slot_count()), debug_colours.CYAN)
-
     n_out = W.shape[0]
     n_in = W.shape[1]
+    n_in_ = n_out * (2 ** math.ceil(math.log2((n_in + n_out - 1) / n_out)))
 
-    #debug('low_lat::dense_to_dense', 'out, in: ' + str(W.shape), debug_colours.CYAN)
-
-    n_in_ = 2 ** int(math.ceil(math.log2(n_in)))
-    n_out_ = 2 ** int(math.ceil(math.log2(n_out)))
-
-    if n_in_ > message.slot_count() // 2:
+    if n_in > message.slot_count():
         raise Exception('input size too large')
-
-    W_ = np.copy(W)
-
-    W_ = np.row_stack((W_, np.zeros((n_out_ - n_out, n_in))))
-    W_ = np.column_stack((W_, np.zeros((n_out_, n_in_ - n_in))))
-
-    #debug('low_lat::dense_to_dense', 'out_, in_: ' + str(W_.shape), debug_colours.CYAN)
-
-    _add_ip(message, _rotate(message, -n_in_))
+    if n_in_ > message.slot_count():
+        raise Exception('cannot find good dimensions for: ' + str(n_out) + ', ' + str(n_in))
 
     result = None
+    rots = 0
+    adds = 0
+    mults = 0
 
-    for i in tqdm(range(n_out_)):
-        row = [W_[(i + j) % n_out_, j] for j in range(n_in_)]
-        right_shift = 0 if i == 0 else n_out_ + i
-        row = row[-right_shift:] + row[:-right_shift]
-
+    for i in tqdm(range(n_out)):
+        row = [W[(i + j) % n_out, j] for j in range(n_in)]
+        right_shift = i
+        row = [0 for _ in range(right_shift)] + row
         t = _mult(_rotate(message, right_shift), row)
+        rots += 1
+        mults += 1
 
         if result is None:
             result = t
         else:
             _add_ip(result, t)
+            adds += 1
 
-    #debug('low_lat::dense_to_dense', str(n_in_ // n_out_), debug_colours.CYAN)
+    r = rot_sum(result, n_out, n_in_)
+    t = int(math.log2(n_in_ // n_out))
+    rots += t
+    adds += t
 
-    r = rot_sum(result, n_out_, n_in_)
-    # import matplotlib.pyplot as plt
-    # t = np.reshape(r.debug(length=32 * 32), (32, 32))
-    # plt.imshow(t)
-    # plt.show()
-
-    return r
-
-
-
-
-
-
-
-
-
+    return r, rots, mults, adds
 
 def find_groups(fm, k, s):
     """
@@ -199,6 +198,7 @@ def conv_weights(d_in, kernel, s):
     obtain weights from kernel, equivalent to Dense(d_in ** 2, d_out ** 2)
     '''
     d_out = int(math.ceil((d_in - kernel.shape[0] + 1) / s))
+    print(d_out)
     W = np.zeros((d_out ** 2, d_in ** 2))
     k = kernel.shape[0]
     kernel_flat = kernel.flatten()

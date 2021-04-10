@@ -51,20 +51,26 @@ class Creator:
 
         return HETensor(np.array(t))
 
-    def obtain_image_groups(self, mat: np.ndarray, k: int, s: int) -> np.ndarray:
-        result = []
+    def obtain_image_groups(self, mat: np.ndarray, k: int, s: int) -> HETensor:
+        """
+        @param mat: input image
+        @param k: kernel dimension
+        @param s: stride size
+        @return: HETensor of shape = (1, g) where g is k * k * c_in
+        """
+        groups = []
 
         for c in range(mat.shape[2]):
             fm = mat[:, :, c]
+            groups.extend(find_groups(fm, k, s))
 
-            gs = []
-            for g in find_groups(fm, k, s):
-                gs.append(self.encrypt_value(g))
-            result.append(gs)
+        result = []
 
-        result = np.array(result)
+        for group in groups:
+            result.append(self.encrypt_value(group))
 
-        return HETensor(result)
+        return HETensor(np.array(result))
+
 
     def zero(self, batched_real=None):
         if isinstance(self.scheme, CRTScheme):
