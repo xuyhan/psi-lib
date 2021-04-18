@@ -1,9 +1,10 @@
 from typing import List
 
 import numpy as np
+from batched_real import HEReal
 from tqdm import tqdm
 
-from batched_real import HEReal
+from utils.utils import merge_ops
 
 
 class BatchedRealVec:
@@ -74,8 +75,14 @@ class BatchedRealVec:
 
     def multiply_element_wise_plain(self, vec_raw):
         self.__vec_raw_check(vec_raw)
-        new_data = [self.data[i].multiply_raw(vec_raw[i]) for i in range(len(self.data))]
-        return BatchedRealVec(new_data)
+        ops = {'multPC' : 0}
+        new_data = []
+        for i in range(len(self.data)):
+            if vec_raw[i] == 0:
+                continue
+            ops['multPC'] += 1
+            new_data.append(self.data[i].multiply_raw(vec_raw[i]))
+        return BatchedRealVec(new_data), ops
 
     def hadamard_mult_plain_in_place(self, vec_raw):
         self.__vec_raw_check(vec_raw)
@@ -90,14 +97,20 @@ class BatchedRealVec:
             batched_real.square_in_place()
 
     def get_sum(self):
+        ops = {'addCC' : 0}
+
+        if self.len() == 0:
+            return None, ops
+
         if self.len() == 1:
-            return self.data[0]
+            return self.data[0], ops
 
         total = self.data[0].add(self.data[1])
         for i in range(2, self.len()):
             total.add_in_place(self.data[i])
+            ops['addCC'] += 1
 
-        return total
+        return total, ops
 
     def dot(self, batched_real_vec):
         self.__vec_enc_check(batched_real_vec)
@@ -106,7 +119,9 @@ class BatchedRealVec:
 
     def dot_plain(self, vec_raw):
         self.__vec_raw_check(vec_raw)
-        return self.multiply_element_wise_plain(vec_raw).get_sum()
+        t, ops1 = self.multiply_element_wise_plain(vec_raw)
+        result, ops2 = t.get_sum()
+        return result, merge_ops(ops1, ops2)
 
     def __vec_enc_check(self, batched_real_vec):
         if self.len() != batched_real_vec.len():
@@ -150,6 +165,10 @@ class HETensor:
             for j in range(shape[1]):
                 out[i][j] = self.element(i, j)
         return out
+
+    def size(self) -> int:
+        s = self.shape()
+        return s[0] * s[1]
 
     def relinearise(self):
         for row in self.data:
@@ -197,15 +216,17 @@ class HETensor:
         for i in range(self.shape()[0]):
             self.data[i].add_in_place(real_mat.data[i])
 
-    def add_raw_in_place(self, raw_mat: np.ndarray, debug=False):
-        if debug:
-            print('Adding biases')
-
+    def add_raw_in_place(self, raw_mat: np.ndarray):
         if self.shape() != raw_mat.shape:
             raise Exception('Shape mismatch in matrix add: %s != %s' % (self.shape(), raw_mat.shape))
 
+        ops = {'addPC': 0}
+
         for i in range(self.shape()[0]):
             self.row(i).add_raw_in_place(raw_mat[i])
+            ops['addPC'] += self.shape()[0]
+
+        return ops
 
     def flatten(self):
         result = []
@@ -238,41 +259,27 @@ class HETensor:
             data_new.append(BatchedRealVec(row_new))
         return HETensor(data_new)
 
-    def mult_plain(self, raw_mat: np.ndarray, multiprocessing=False, debug=False):
+    def mult_plain(self, raw_mat: np.ndarray, creator):
         if self.shape()[1] != raw_mat.shape[0]:
             raise Exception("Error cannot multiply %s matrix with %s matrix" %(self.shape(), raw_mat.shape))
-        data_new = []
-        shape_a = self.shape()
-        shape_b = raw_mat.shape
 
-        total = shape_a[0] * shape_b[1]
+        layer_mapped = creator.zero_mat(self.shape()[0], raw_mat.shape[1])
+
+        total = self.shape()[0] * raw_mat.shape[1]
         bar = tqdm(total=total)
 
-        for i in range(shape_a[0]):
-            row_a = self.row(i)
-            row_new = [None for _ in range(shape_b[1])]
+        ops = {}
 
-            def parallel_func(j):
-                return row_a.dot_plain(raw_mat[:, j])
-
-            for j in range(shape_b[1]):
-                row_new[j] = parallel_func(j)
+        for i in range(self.shape()[0]):
+            for j in range(raw_mat.shape[1]):
+                dot_prod, ops_ = self.row(i).dot_plain(raw_mat[:, j])
+                ops = merge_ops(ops, ops_)
+                if dot_prod is not None:
+                    layer_mapped.set_element(i, j, dot_prod)
                 bar.update(1)
-
-            data_new.append(BatchedRealVec(row_new))
-
         bar.close()
 
-        return HETensor(data_new)
-
-    # def pad_in_place(self):
-    #     old_h, old_w = self.shape()
-    #     for vec in self.data:
-    #         vec.prepend(self.creator.zero(self.element(0, 0)))
-    #         vec.append(self.creator.zero(self.element(0, 0)))
-    #
-    #     self.data = [self.creator.zero_vec(old_w + 2, self.element(0, 0))] + self.data
-    #     self.data.append(self.creator.zero_vec(old_w + 2, self.element(0, 0)))
+        return layer_mapped, ops
 
     def transpose(self):
         data = []

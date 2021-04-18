@@ -13,7 +13,7 @@ class debug_colours:
     UNDERLINE = '\033[4m'
 
 def debug(tag, message, mode=debug_colours.BLUE):
-    if mode != debug_colours.PURPLE:
+    if mode not in [debug_colours.PURPLE, debug_colours.BLUE]:
         return
 
     print(mode +

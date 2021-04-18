@@ -1,11 +1,11 @@
-from schemes import *
-from lin_algebra import HEReal, HETensor, BatchedRealVec
-from batched_real_integer import HERealInteger
-from batched_real_double import HERealDouble
-from low_lat import find_groups
-
 import numpy as np
+from batched_real_double import HERealDouble
+from batched_real_integer import HERealInteger
+from schemes import *
 from tqdm import tqdm
+
+from lin_algebra import HEReal, HETensor, BatchedRealVec
+from low_lat import find_groups
 
 
 class Creator:
@@ -70,7 +70,6 @@ class Creator:
             result.append(self.encrypt_value(group))
 
         return HETensor(np.array(result))
-
 
     def zero(self, batched_real=None):
         if isinstance(self.scheme, CRTScheme):

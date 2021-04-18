@@ -5,7 +5,7 @@ from tqdm import tqdm
 import numpy as np
 
 from batched_real import HEReal
-from logger import debug, debug_colours
+
 
 def _rotate(v: HEReal, n):
     return v.rot(n)
@@ -73,21 +73,27 @@ def permute(v, p):
 
 def concat(messages: List[HEReal], n: int) -> HEReal:
     m0 = messages[0]
+    rots = 0
+    adds = 0
     for i in range(1, len(messages)):
         t = _rotate(messages[i], i * n)
         _add_ip(m0, t)
-    return m0
+        rots += 1
+        adds +=1
+    return m0, rots, adds
 
 def unconcat(message: HEReal, length: int, n: int) -> List[HEReal]:
     if length % n != 0:
         raise Exception('Cannot unconcat %s to %s' %(length, n))
 
     messages = []
+    rots = 0
 
     for i in range(length // n):
         messages.append(_rotate(message, - i * n))
+        rots += 1
 
-    return messages
+    return messages, rots
 
 def convolve3D(conv: List[HEReal], d_out: int, filter) -> (HEReal, int, int):
     """
@@ -210,33 +216,12 @@ def conv_weights(d_in, kernel, s):
     return W
 
 
-# if __name__ == '__main__':
-#     '''
-#         test if fast conv and dense conv give same result
-#     '''
-#     helper = LowLatOps(None)
-#
-#     s = 2
-#     k = 3
-#     d_in = 32
-#
-#     fm = np.arange(d_in ** 2).reshape(d_in, d_in)
-#     v = helper._enc(list(fm.flatten()))
-#     kernel = np.arange(k * k).reshape(k, k)
-#     W = helper.conv_weights(d_in, kernel, s)
-#     print(list(np.matmul(W, fm.flatten())[:30]))
-#
-#     gs = [helper._enc(g) for g in LowLatOps.find_groups(fm, kernel.shape[0], s)]
-#     print(helper.convolve(gs, kernel)[:30])
-#
-#     print(W.shape)
 
 
-'''
 def sparse_to_dense(self, ts):
-    result = self._zeros()
+    result = _zeros()
     for i, t in enumerate(ts):
-        self._add_ip(result, self._rotate(t, i))
+        _add_ip(result, _rotate(t, i))
     return result
         
 def stacked_to_il(message, W, n, d):
@@ -250,17 +235,15 @@ def stacked_to_il(message, W, n, d):
 
     for i in range(num_mults):
         w = list(W[i:i + n].flatten())  #+ [0 for _ in range(gap)]
-        t = mult(message, w)
+        t = _mult(message, w)
         for j in range(d):
-            add(t, rotate(t, 2 ** j))
-        print(t[:100])
-        exit(0)
+            _add_ip(t, _rotate(t, 2 ** j))
         ts.append(t)
 
     # combine
-    result = zeros()
+    result = _zeros()
     for i, t in enumerate(ts):
-        add(result, rotate(t, i))
+        _add_ip(result, _rotate(t, i))
 
     # perm
     perm = [(i % n) * d + (i // n) for i in range(W.shape[0])]
@@ -272,8 +255,7 @@ def il_to_sparse(message, W, n, perm):
 
     result = []
     for i in range(W.shape[0]):
-        t = mult(message, permute(W[i], perm))
+        t = _mult(message, permute(W[i], perm))
         t = shift_sum(t, n)
         result.append(t)
     return result
-'''
