@@ -1,23 +1,23 @@
 import math
 import time
+from typing import Dict
 
-from data_loader import load_data
-from logger import debug, debug_colours
-from schemes import *
-
-import low_lat
-from creator import Creator
-from lin_algebra import *
-from utils import merge_ops
+import model.low_lat as low_lat
+from crypto.schemes import *
+from model.creator import Creator
+from model.lin_algebra import *
+from utils.logger import msg, OutFlags
+from utils.utils import merge_ops, init_ops
 
 
 class Layer:
-    def __init__(self, input_shape, output_shape, requires_weights=True):
+    def __init__(self, input_shape, output_shape, name, requires_weights=True):
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.weights = None
         self.weight_scale = None
         self.creator = None
+        self.name = name
         self.requires_weights = requires_weights
 
     def check_input_shape(self, input_data: List[HETensor]):
@@ -28,9 +28,6 @@ class Layer:
         if received_shape != self.input_shape:
             raise Exception('Input data has wrong shape: received %s, expected %s' % (received_shape, self.input_shape))
 
-    def description(self):
-        pass
-
     def configure_input(self, input_shape):
         pass
 
@@ -40,18 +37,17 @@ class Layer:
     def set_weight_scale(self, scale):
         self.weight_scale = scale
 
-    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
-        return input_data
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        return input_data, init_ops()
 
-    def apply_fast(self, input_data: HETensor) -> HETensor:
-        return input_data
+    def apply_fast(self, input_data: HETensor) -> (List[HETensor], Dict):
+        return input_data, init_ops()
+
 
 class InputLayer(Layer):
     def __init__(self, input_shape):
-        super().__init__(input_shape=input_shape, output_shape=input_shape)
+        super().__init__(input_shape=input_shape, output_shape=input_shape, requires_weights=False, name='input')
 
-    def description(self):
-        return 'Input Layer, input shape = ' + str(self.input_shape)
 
 class ConvLayer(Layer):
     def __init__(self, kernel_size, stride, padding, num_maps, dense_mode=False):
@@ -61,11 +57,7 @@ class ConvLayer(Layer):
         self.num_maps = num_maps
         self.dense_mode = dense_mode
 
-        super().__init__(input_shape=None, output_shape=None)
-
-    def description(self):
-        return 'Conv2D layer, input shape = {}, output shape = {}, weights shape = {}' \
-            .format(self.input_shape, self.output_shape, self.weights.shape)
+        super().__init__(input_shape=None, output_shape=None, name='conv')
 
     def configure_input(self, input_shape):
         if len(input_shape) != 3:
@@ -93,48 +85,40 @@ class ConvLayer(Layer):
 
         if extra.shape != expected_extra:
             raise Exception('Incompatible bias weights for convolution layer. Expected %s, received %s' % (
-            expected_extra, weights.shape))
+                expected_extra, weights.shape))
 
         self.weights = weights
         self.biases = extra
 
-    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
-        def method1(in_data):
-            out = []
+    def apply_fast(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        out = []
 
-            mult_cc = 0
-            add_pc = 0
-            add_cc = 0
+        ops = init_ops()
 
-            for j in tqdm(range(self.weights.shape[-1])):
-                fm_out = None
+        for j in tqdm(range(self.weights.shape[-1])):
+            fm_out = None
 
-                kernel = self.weights[:, :, :, j].transpose((2, 0, 1))
+            kernel = self.weights[:, :, :, j].transpose((2, 0, 1))
 
-                groups = input_data[0].detach()[0]
+            groups = input_data[0].detach()[0]
 
-                if fm_out is None:
-                    fm_out, m, a = low_lat.convolve3D(groups, self.output_shape[-1], kernel)
-                else:
-                    fm, m, a = low_lat.convolve3D(groups, self.output_shape[-1], kernel)
-                    fm_out.add_in_place(fm)
-                    add_cc += a
+            if fm_out is None:
+                fm_out, ops_ = low_lat.convolve3D(groups, self.output_shape[-1], kernel)
+                ops = merge_ops(ops, ops_)
+            else:
+                fm, ops_ = low_lat.convolve3D(groups, self.output_shape[-1], kernel)
+                fm_out.add_in_place(fm)
+                ops['addCC'] += 1
+                ops = merge_ops(ops, ops_)
 
-                mult_cc += m
+            bias = [self.biases[j] for _ in range(self.output_shape[-1] * self.output_shape[-2])]
+            fm_out.add_raw_in_place(bias)
+            ops['addPC'] += 1
+            out.append(fm_out)
 
-                bias = [self.biases[j] for _ in range(self.output_shape[-1] * self.output_shape[-2])]
-                fm_out.add_raw_in_place(bias)
-                add_pc += 1
+        return [HETensor(np.array(out))], ops
 
-                out.append(fm_out)
-
-            debug('conv2d', f'#multCC: {mult_cc}, #addPC: {add_pc}, #addCC: {add_cc}', debug_colours.BLUE)
-
-            return [HETensor(np.array(out))]
-
-        return method1(input_data)
-
-    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
         output_layers = []
 
         total = self.output_shape[0] * self.output_shape[1] * self.output_shape[2]
@@ -142,7 +126,7 @@ class ConvLayer(Layer):
 
         weights = np.transpose(self.weights, (2, 0, 1, 3))
 
-        ops = {'addPC': 0}
+        ops = init_ops()
 
         for j_output in range(self.output_shape[0]):
             layer_mapped = self.creator.zero_mat(self.output_shape[1], self.output_shape[2])
@@ -181,18 +165,13 @@ class ConvLayer(Layer):
 
         pbar.close()
 
-        for k, v in ops.items():
-            print(k + ' ' + str(v))
+        return output_layers, ops
 
-        return output_layers
 
 class Flatten(Layer):
     def __init__(self, groups=1):
-        super().__init__(input_shape=None, output_shape=None)
+        super().__init__(input_shape=None, output_shape=None, requires_weights=False, name='flatten')
         self.groups = groups
-
-    def description(self):
-        return 'Flatten layer, input shape = {}, output shape = {}'.format(self.input_shape, self.output_shape)
 
     def configure_input(self, input_shape):
         self.input_shape = input_shape
@@ -207,43 +186,39 @@ class Flatten(Layer):
 
         out = []
 
-        cpg = self.input_shape[0] // self.groups  # channels per group
-        sgs = n * cpg  # split group size
+        cpg = int(math.ceil(self.input_shape[0] / float(self.groups)))  # channels per group
+        cpg_last = self.input_shape[0] % cpg
+        cpg_last = cpg if cpg_last == 0 else cpg_last
 
-        debug('Flatten::apply_fast', 'channels per group: ' + str(cpg), debug_colours.GREEN)
-        debug('Flatten::apply_fast', 'group size: ' + str(sgs), debug_colours.GREEN)
+        msg('Flatten::apply_fast', 'channels per group: ' + str(cpg), OutFlags.INFO)
+        msg('Flatten::apply_fast', 'channels in last group: ' + str(cpg_last), OutFlags.INFO)
 
-        rots_total = 0
-        adds_total = 0
+        ops = init_ops()
 
         for i in range(self.groups):
-            gr, rots, adds = low_lat.concat(messages[i * cpg: (i + 1) * cpg], n)
+            cpg_ = cpg_last if i == self.groups - 1 else cpg
+            gr, ops_ = low_lat.concat(messages[i * cpg: i * cpg + cpg_], n)
             out.append(gr)
-            rots_total += rots
-            adds_total += adds
+            ops = merge_ops(ops, ops_)
 
-        debug('flatten::', f'#rots: {rots_total}, #add-CC: {adds_total}', debug_colours.BLUE)
+        return [HETensor(np.array(out))], ops
 
-        return [HETensor(np.array(out))]
-
-    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
-        print('-----Applying flatten layer-----')
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
         temp = input_data[0].flatten()
         for i in range(1, len(input_data)):
             temp.column_concat(input_data[i].flatten())
-        return [temp]
+
+        return [temp], init_ops()
+
 
 class Unflatten(Layer):
     def __init__(self, channels):
-        super().__init__(input_shape=None, output_shape=None, requires_weights=False)
+        super().__init__(input_shape=None, output_shape=None, requires_weights=False, name='unflatten')
         self.channels = channels
-
-    def description(self):
-        return 'Unflatten layer, input shape = {}, output shape = {}'.format(self.input_shape, self.output_shape)
 
     def configure_input(self, input_shape):
         if np.prod(input_shape) % self.channels != 0:
-            raise Exception('Cannot unflatten %s to %s channels' %(str(input_shape), str(self.channels)))
+            raise Exception('Cannot unflatten %s to %s channels' % (str(input_shape), str(self.channels)))
         t = np.prod(input_shape) // self.channels
         if not math.sqrt(t).is_integer():
             raise Exception('%s not square' % t)
@@ -251,22 +226,20 @@ class Unflatten(Layer):
         self.input_shape = input_shape
         self.output_shape = (self.channels, int(math.sqrt(t)), int(math.sqrt(t)))
 
-    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+    def apply_fast(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
         vec_in = input_data[0].detach()[0, 0]
-        messages, rots = low_lat.unconcat(vec_in, int(np.prod(self.output_shape)), int(np.prod(self.output_shape)) //
-                                    self.channels)
+        ops = init_ops()
+        messages, ops_ = low_lat.unconcat(vec_in, int(np.prod(self.output_shape)), int(np.prod(self.output_shape)) //
+                                          self.channels)
+        ops = merge_ops(ops, ops_)
 
-        debug('unconcat::', f'#rots: {rots}', debug_colours.BLUE)\
+        return [HETensor(np.array(messages))], ops
 
-        return [HETensor(np.array(messages))]
 
 class DenseLayer(Layer):
-    def __init__(self, output_length):
-        super().__init__(input_shape=None, output_shape=(1, 1, output_length))
-
-    def description(self):
-        return 'Dense layer, input shape = {}, output shape = {}, weights shape = {}'. \
-            format(self.input_shape, self.output_shape, self.weights.shape)
+    def __init__(self, output_length, prev_channels=1):
+        self.prev_channels = prev_channels
+        super().__init__(input_shape=None, output_shape=(1, 1, output_length), name='dense')
 
     def configure_input(self, input_shape):
         if input_shape[0] > 1 or input_shape[1] > 1:
@@ -286,81 +259,98 @@ class DenseLayer(Layer):
         self.weights = weights
         self.biases = extra
 
-    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
-        debug('DenseLayer::apply_fast', 'split_input mode on', debug_colours.GREEN)
+    def apply_fast(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        ops = init_ops()
 
         groups = input_data[0].detach()[0]
-        sgs = self.input_shape[-1] // len(groups)
+        # sgs = self.input_shape[-1] // len(groups)
 
-        debug('DenseLayer::apply_fast', 'group size: ' + str(sgs), debug_colours.GREEN)
+        cpg = int(math.ceil(self.prev_channels / len(groups)))  # channels per group
+        cpg_last = self.prev_channels % cpg
+        cpg_last = cpg if cpg_last == 0 else cpg_last
+        sgs = cpg * (self.input_shape[-1] // self.prev_channels)
+        sgs_last = cpg_last * (self.input_shape[-1] // self.prev_channels)
+
+        msg('DenseLayer::apply_fast', 'group size: ' + str(sgs), OutFlags.INFO)
+        msg('DenseLayer::apply_fast', 'last group size: ' + str(sgs_last), OutFlags.INFO)
 
         result = None
 
-        rots, mults, adds = 0, 0, 0
-
         for i, t in enumerate(groups):
-            W = self.weights.transpose((1, 0))[:, i * sgs: (i + 1) * sgs]
-            o, r, m, a = low_lat.dense_to_dense(t, W)
-            rots += r
-            mults += m
-            adds += a
+            sgs_ = sgs_last if i == len(groups) - 1 else sgs
+            W = self.weights.transpose((1, 0))[:, i * sgs: i * sgs + sgs_]
+            o, ops_ = low_lat.dense_to_dense(t, W)
+            ops = merge_ops(ops, ops_)
 
             if result is None:
                 result = o
             else:
                 result.add_in_place(o)
+                ops['addCC'] += 1
 
         result.add_raw_in_place(list(self.biases))
+        ops['addPC'] += 1
 
-        debug('dense', f'#rots: {rots}, #multPC: {mults}, #addCC: {adds}, #addPC: 1', debug_colours.BLUE)
+        return [HETensor(result)], ops
 
-        if self.output_shape[-1] == 10:
-            np.save('10outputs.npy', result.debug(4096))
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        ops = init_ops()
 
-        return [HETensor(result)]
-
-    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
-        print('-----Applying dense layer-----')
-        ops = {}
         mat, ops_ = input_data[0].mult_plain(self.weights, self.creator)
         ops = merge_ops(ops, ops_)
         ops_ = mat.add_raw_in_place(raw_mat=self.biases.reshape(1, -1))
         ops = merge_ops(ops, ops_)
 
-        for k, v in ops.items():
-            print(k + ' ' + str(v))
+        return [mat], ops
 
-        return [mat]
+
+class SubLayer(Layer):
+    def __init__(self, size):
+        super().__init__(input_shape=(2, 1, size), output_shape=(1, 1, size), requires_weights=False, name='distance')
+        self.size = size
+
+    def configure_input(self, input_shape):
+        if input_shape != self.input_shape:
+            raise Exception('Expected input to have shape %s' % self.input_shape)
+
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        ops = init_ops()
+
+        half_first = input_data[0]
+        half_second = input_data[1]
+        half_first.sub_in_place(half_second)
+        half_first.square_in_place()
+
+        ops['addCC'] += self.size
+        ops['mulCC'] += self.size
+
+        return [half_first], ops
+
 
 class ActivationLayer(Layer):
     def __init__(self, mode='square'):
-        super().__init__(input_shape=None, output_shape=None)
+        super().__init__(input_shape=None, output_shape=None, requires_weights=False, name='activation_' + mode)
         self.mode = mode
-
-    def description(self):
-        return 'Activation layer, mode = {}, input shape = {}, output shape = {}'. \
-            format(self.mode, self.input_shape, self.output_shape)
 
     def configure_input(self, input_shape):
         self.input_shape = input_shape
         self.output_shape = input_shape
 
-    def apply(self, input_data: List[HETensor]) -> List[HETensor]:
+    def apply(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
+        ops = init_ops()
+
         if self.mode == 'square':
-            num_ct = 0
             for layer in input_data:
                 layer.square_in_place()
-                num_ct += layer.size()
-            debug('square::', f'#mult-CC: {num_ct}', debug_colours.BLUE)
-            return input_data
+                ops['mulCC'] += layer.size()
+        elif self.mode != 'identity':
+            raise Exception('Unknown activation: ' + self.mode)
 
-        if self.mode == 'identity':
-            return input_data
+        return input_data, ops
 
-        raise Exception('unknown activation: ' + str(self.mode))
-
-    def apply_fast(self, input_data: List[HETensor]) -> List[HETensor]:
+    def apply_fast(self, input_data: List[HETensor]) -> (List[HETensor], Dict):
         return self.apply(input_data)
+
 
 class Model:
     def __init__(self, creator):
@@ -374,41 +364,70 @@ class Model:
         if not self.compiled or not self.weights_loaded:
             raise Exception('Model summary cannot be outputed before compilation and weight-loading.')
 
-        text = '-------Summary of model-------\n'
+        print('-------Summary of model-------')
+
+        format = '{:<27}' * 3
+        print(OutFlags.BOLD + format.format('Name', 'Input shape', 'Output shape') + OutFlags.END)
 
         for layer in self.layers:
-            text += layer.description() + '\n'
+            print(format.format(layer.name, str(layer.input_shape), str(layer.output_shape)))
 
-        print(text)
-
-    def predict(self, input_data, creator: Creator, classes: int):
+    def predict(self, input_data):
         if isinstance(input_data, HETensor):
             input_data = [input_data]
 
         output_data = self.apply(input_data)[0]
 
-        decrypted = np.array(creator.debug(output_data, classes))
-
-        if self.data_mode == 0:
-            return decrypted
-        return decrypted[0, 0, :]
+        return output_data
 
     def apply(self, input_data: List[HETensor]) -> List[HETensor]:
         if not self.compiled:
             raise Exception('Model cannot be used before compilation')
 
         prev_output = input_data
+        ops_all = []
+        deltas_all = []
 
-        t0 = time.process_time()
-        for i in range(len(self.layers)):
+        t_start = time.process_time()
+        t0 = t_start
+        for i, layer in enumerate(self.layers):
+            msg('Applying layer', layer.name, OutFlags.INFO)
+
             if self.data_mode == 0:
-                self.layers[i].check_input_shape(prev_output)
-                prev_output = self.layers[i].apply(prev_output)
+                layer.check_input_shape(prev_output)
+                prev_output, ops = layer.apply(prev_output)
             else:
-                prev_output = self.layers[i].apply_fast(prev_output)
+                prev_output, ops = layer.apply_fast(prev_output)
+
             t1 = time.process_time()
-            debug('Layer ' + str(i), str(t1 - t0), debug_colours.PURPLE)
+            delta = t1 - t0
+            msg('Time elapsed', str(round(delta, 5)), OutFlags.INFO)
             t0 = t1
+
+            ops_all.append(ops)
+            deltas_all.append(delta)
+
+        msg('Total inference time', str(round(time.process_time() - t_start, 5)), OutFlags.INFO)
+
+        print('------Summary of operations------')
+        format = '{:<20}' + '{:<10}' * 7
+        print(OutFlags.BOLD + format.format('Layer', '#HOPS', '#AddPC', '#AddCC', '#MulPC', '#MulCC', '#Rots',
+                                            'Time') + OutFlags.END)
+        table = []
+
+        for i, layer in enumerate(self.layers):
+            ops = ops_all[i]
+            hops = np.sum([v for v in ops.values()])
+            delta = round(deltas_all[i], 3)
+            table_row = [layer.name, hops, ops['addPC'], ops['addCC'], ops['mulPC'], ops['mulCC'], ops['rots'], delta]
+            table.append(table_row)
+            print(format.format(*[v if v != 0 else '-' for v in table_row]))
+
+        final_row = ['Total', ]
+        for i in range(1, 8):
+            final_row.append(round(np.sum([row[i] for row in table]), 3))
+
+        print(format.format(*[v if v != 0 else '-' for v in final_row]))
 
         return prev_output
 
@@ -433,6 +452,9 @@ class Model:
             layer.configure_input(input_shape=prev_output_shape)
             prev_output_shape = layer.output_shape
 
+        for i, layer in enumerate(self.layers):
+            layer.name += str(i)
+
         self.compiled = True
 
     def load_weights(self, weights, scale: int):
@@ -444,7 +466,7 @@ class Model:
                 required_weights += 1
 
         if len(weights) != required_weights:
-            raise Exception('Weights error: does not match number of layers in model.')
+            raise Exception('Weights error: does not match number of layers in model: %s' % required_weights)
 
         j = 0
         for i in range(0, len(self.layers)):
@@ -464,6 +486,7 @@ class Model:
             raise Exception('Model not compiled yet')
         return self.layers[-1].output_shape
 
+
 def accuracy(a, b):
     count = 0
     for i in range(len(a)):
@@ -471,45 +494,10 @@ def accuracy(a, b):
             count += 1
     return count / len(a)
 
-def cifar():
-    N = 8192
-    scheme = get_ckks_scheme(512 * 16 * 2)
-    creator = Creator(scheme)
-    scheme.summary()
-
-    model = Model(creator)
-    model.add(InputLayer(input_shape=(3, 32, 32)))
-    model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=16))
-    model.add(ActivationLayer(mode='square'))
-    model.add(ConvLayer(kernel_size=(3, 3), stride=2, padding=0, num_maps=16))
-    model.add(ActivationLayer(mode='square'))
-    model.add(Flatten())
-    model.add(DenseLayer(output_length=32))
-    model.add(ActivationLayer(mode='square'))
-    model.add(DenseLayer(output_length=32))
-    model.add(ActivationLayer(mode='square'))
-    model.add(DenseLayer(output_length=10))
-
-    weights, test_features, preds_base, outputs_base = load_data(name='CIFAR')
-
-    test_features = test_features[:N]
-    preds_base = preds_base[:N]
-    outputs_base = outputs_base[:N]
-
-    model.compile()
-    model.load_weights(weights, scale=16)
-    model.summary()
-
-    print('Encrypting %s items' % len(test_features))
-
-    preds_new, _ = model.predict(input_data=creator.encrypt_simd(mat=test_features),
-                                 creator=creator,
-                                 length=N)
-
-    print(accuracy(preds_new, preds_base))
 
 def depth_test():
-    scheme = get_ckks_scheme(512 * 16 * 2 * 2, primes=[60, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 60], scale_factor=50)
+    scheme, _ = init_scheme_ckks(512 * 16 * 2 * 2, primes=[60, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 60],
+                                 scale_factor=50)
     creator = Creator(scheme)
     scheme.summary()
 
@@ -519,6 +507,4 @@ def depth_test():
     v.square_in_place()
     v.square_in_place()
     v.square_in_place()
-    print(v.debug(10))
-
-
+    print(v.msg(10))

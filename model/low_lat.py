@@ -1,39 +1,30 @@
 import math
-from typing import List
-from tqdm import tqdm
-
+from typing import List, Dict
 import numpy as np
-
-from batched_real import HEReal
+from real.batched_real import HEReal
+from tqdm.notebook import tqdm
+from utils.utils import init_ops, merge_ops
 
 
 def _rotate(v: HEReal, n):
     return v.rot(n)
-    #return v[-n:] + v[:-n]
+
 
 def _mult(m: HEReal, s):
     return m.multiply_raw(list(s))
-    # s = self._enc(list(s))
-    # return [m[i] * s[i] for i in range(len(m))]
+
 
 def _mult_const(m, c):
     return m.multiply_raw(c)
-    # s = self._enc([c for _ in range(8192)])
-    # return [m[i] * s[i] for i in range(len(m))]
+
 
 def _zeros(ref: HEReal):
     return ref.zeros()
-   # return [0 for _ in range(8192)]
+
 
 def _add_ip(m1: HEReal, m2: HEReal):
     m1.add_in_place(m2)
-    # assert(len(m1) == len(m2))
-    # for i in range(len(m2)):
-    #     m1[i] += m2[i]
 
-# def _enc(self, l):
-#     assert(len(l) <= 8192)
-#     return l + [0 for _ in range(8192 - len(l))]
 
 def shift_sum(v: HEReal, n: int):
     """
@@ -48,6 +39,7 @@ def shift_sum(v: HEReal, n: int):
         _add_ip(result, _rotate(v, -n))
     return result
 
+
 def rot_sum(v: HEReal, n: int, m: int):
     """
     @param v: ciphertext
@@ -55,69 +47,77 @@ def rot_sum(v: HEReal, n: int, m: int):
     @param m: input size, require that m is n * 2^k for some k
     @return: the sum
     """
+    ops = init_ops()
+
     t = m
 
     result = v
     while t > n:
         t = t // 2
         _add_ip(result, _rotate(v, -t))
+        ops['addCC'] += 1
+        ops['rots'] += 1
 
-    return result
+    return result, ops
+
 
 def permute(v, p):
-    assert(len(v) == len(p))
+    assert (len(v) == len(p))
     result = [0 for _ in range(len(v))]
     for i, w in enumerate(v):
         result[p[i]] = w
     return result
 
-def concat(messages: List[HEReal], n: int) -> HEReal:
+
+def concat(messages: List[HEReal], n: int) -> (HEReal, Dict):
+    ops = init_ops()
     m0 = messages[0]
-    rots = 0
-    adds = 0
+
     for i in range(1, len(messages)):
         t = _rotate(messages[i], i * n)
         _add_ip(m0, t)
-        rots += 1
-        adds +=1
-    return m0, rots, adds
+        ops['rots'] += 1
+        ops['addCC'] += 1
+    return m0, ops
 
-def unconcat(message: HEReal, length: int, n: int) -> List[HEReal]:
+
+def unconcat(message: HEReal, length: int, n: int) -> (List[HEReal], Dict):
     if length % n != 0:
-        raise Exception('Cannot unconcat %s to %s' %(length, n))
+        raise Exception('Cannot unconcat %s to %s' % (length, n))
+    ops = init_ops()
 
     messages = []
-    rots = 0
 
     for i in range(length // n):
         messages.append(_rotate(message, - i * n))
-        rots += 1
+        ops['rots'] += 1
+    return messages, ops
 
-    return messages, rots
 
-def convolve3D(conv: List[HEReal], d_out: int, filter) -> (HEReal, int, int):
+def convolve3D(conv: List[HEReal], d_out: int, filter) -> (HEReal, Dict):
     """
     @param conv: list of regions, expect each to be flattened in order of channel, d, d
     @param filter: set of kernels, expect to be of (channel, k, k)
     """
     if len(filter.shape) != 3:
         raise Exception('Expected 3D filter.')
+    ops = init_ops()
 
     result = None
     kernel_flat = filter.flatten()
-    mults = 0
-    adds = 0
+
     for i in range(kernel_flat.shape[0]):
         c = [kernel_flat[i] for _ in range(d_out ** 2)]
         p = _mult_const(conv[i], c)
-        mults += 1
+        ops['mulPC'] += 1
         if result is None:
             result = p
         else:
             _add_ip(result, p)
-            adds += 1
+            ops['addCC'] += 1
 
-    return result, mults, adds
+    return result, ops
+
 
 def dense_to_sparse(message: HEReal, W: np.ndarray) -> List[HEReal]:
     """
@@ -131,6 +131,7 @@ def dense_to_sparse(message: HEReal, W: np.ndarray) -> List[HEReal]:
         result.append(t)
     return result
 
+
 def sparse_to_dense(messages: List[HEReal], i, o) -> HEReal:
     """
     @param messages: list of ciphertexts
@@ -139,18 +140,13 @@ def sparse_to_dense(messages: List[HEReal], i, o) -> HEReal:
     """
     result = _zeros(messages[0])
 
-def dense_to_dense(message: HEReal, W: np.ndarray) -> HEReal:
+
+def dense_to_dense(message: HEReal, W: np.ndarray) -> (HEReal, Dict):
     """
     @param message: ciphertext
     @param W: weight matrix of dimension (d_out, d_in)
     @param n_in: number of nodes in previous layer
     """
-
-    # if W.shape[0] == 10:
-    #     np.save('256inputs.npy', message.debug(8192))
-
-    if W.shape[1] <= W.shape[0]:
-        raise Exception('dense to dense only works if mapping to smaller number of nodes')
 
     n_out = W.shape[0]
     n_in = W.shape[1]
@@ -162,30 +158,27 @@ def dense_to_dense(message: HEReal, W: np.ndarray) -> HEReal:
         raise Exception('cannot find good dimensions for: ' + str(n_out) + ', ' + str(n_in))
 
     result = None
-    rots = 0
-    adds = 0
-    mults = 0
+    ops = init_ops()
 
     for i in tqdm(range(n_out)):
         row = [W[(i + j) % n_out, j] for j in range(n_in)]
         right_shift = i
         row = [0 for _ in range(right_shift)] + row
         t = _mult(_rotate(message, right_shift), row)
-        rots += 1
-        mults += 1
+        ops['rots'] += 1
+        ops['mulPC'] += 1
 
         if result is None:
             result = t
         else:
             _add_ip(result, t)
-            adds += 1
+            ops['addCC'] += 1
 
-    r = rot_sum(result, n_out, n_in_)
-    t = int(math.log2(n_in_ // n_out))
-    rots += t
-    adds += t
+    r, ops_ = rot_sum(result, n_out, n_in_)
+    ops = merge_ops(ops, ops_)
 
-    return r, rots, mults, adds
+    return r, ops
+
 
 def find_groups(fm, k, s):
     """
@@ -198,6 +191,7 @@ def find_groups(fm, k, s):
     return [
         [fm[i // k + (j // d_out) * s][i % k + (j % d_out) * s] for j in range(d_out ** 2)] for i in range(k * k)
     ]
+
 
 def conv_weights(d_in, kernel, s):
     '''
@@ -216,16 +210,8 @@ def conv_weights(d_in, kernel, s):
     return W
 
 
-
-
-def sparse_to_dense(self, ts):
-    result = _zeros()
-    for i, t in enumerate(ts):
-        _add_ip(result, _rotate(t, i))
-    return result
-        
 def stacked_to_il(message, W, n, d):
-    assert(2 ** d >= n)
+    assert (2 ** d >= n)
 
     # stack mult
     gap = 2 ** d - W.shape[1]
@@ -234,7 +220,7 @@ def stacked_to_il(message, W, n, d):
     ts = []
 
     for i in range(num_mults):
-        w = list(W[i:i + n].flatten())  #+ [0 for _ in range(gap)]
+        w = list(W[i:i + n].flatten())
         t = _mult(message, w)
         for j in range(d):
             _add_ip(t, _rotate(t, 2 ** j))
@@ -250,8 +236,9 @@ def stacked_to_il(message, W, n, d):
 
     return result, perm
 
+
 def il_to_sparse(message, W, n, perm):
-    assert(n == W.shape[1])
+    assert (n == W.shape[1])
 
     result = []
     for i in range(W.shape[0]):

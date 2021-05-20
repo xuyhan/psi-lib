@@ -4,8 +4,8 @@ import math
 from polynomial import Polynomial
 from numpy.polynomial.polynomial import Polynomial as Polynomial_np
 # First we set the parameters
-from logger import debug as d
-from logger import debug_colours
+from utils.logger import msg as d
+from utils.logger import OutFlags
 from polynomial import special_mod
 import time
 
@@ -38,28 +38,12 @@ class Params:
 
 class Encoder:
     def __init__(self, params: Params):
-        """
-            M specifies the cyclotomic polynomial to use.
-        """
         self.M = params.N * 2
         self.N = params.N
         self.params = params
         self.root = np.exp(2 * np.pi * 1j / self.M)
-        print('Building basis')
-        self.basis = np.array(self.vandermonde(self.root, self.M))
-        print('Transposing basis')
-        self.basis = self.basis.T
-
-    @staticmethod
-    def vandermonde(e: np.complex128, M: int) -> np.array:
-        N = M // 2
-        matrix = []
-
-        for i in range(N):
-            root = e ** (2 * i + 1)
-            matrix.append([root ** j for j in range(N)])
-
-        return matrix
+        self.basis = [[(self.root ** (2 * i + 1)) ** j for j in range(self.N)] for i in range(self.N)]
+        self.basis = np.array(self.basis).T
 
     def encode(self, v: np.array) -> Polynomial:
         if v.shape != (self.N // 2,):
@@ -68,39 +52,26 @@ class Encoder:
         v = self.project_to_basis(v)
         v = self.random_round(v)
         v = np.matmul(self.basis.T, v)
-
-        return self.sigma_inverse(v)
+        return self.sigma_inv(v)
 
     def decode(self, p: Polynomial, real=False) -> np.array:
         v = self.sigma(p)
         v = self.mirror_inv(v)
-
         if real:
             v = [x.args[0] for x in v]
-
         for i in range(len(v)):
             v[i] = v[i] / self.params.delta_l(1)
-
         return v
 
-    def sigma_inverse(self, b: np.array) -> Polynomial:
-        A = Encoder.vandermonde(self.root, self.M)
+    def sigma_inv(self, b: np.array) -> Polynomial:
+        A = self.basis.T
         cs = np.linalg.solve(A, b)[::-1]
         cs = [np.round(np.real(c)) for c in cs]
-
         return Polynomial.from_coef(cs, int(math.log2(self.N))).round_coefs_nearest()
 
     def sigma(self, p: Polynomial) -> np.array:
-        outputs = []
         p_np = Polynomial_np(np.array(p.p.all_coeffs()[::-1], dtype=float))
-
-        for i in range(self.N):
-            root = self.root ** (2 * i + 1)
-
-            output = p_np(root)
-            outputs.append(output)
-
-        return np.array(outputs)
+        return np.array([p_np(self.root ** (2 * i + 1)) for i in range(self.N)])
 
     def mirror(self, v: np.array) -> np.array:
         mirrored = [np.conjugate(element) for element in v[::-1]]
@@ -127,18 +98,9 @@ def polymod(N: int) -> Polynomial:
     coef = np.array(coef, dtype=object)
     return Polynomial.from_coef(coef, int(math.log2(N)))
 
-def debug_poly(poly: Polynomial, Q_l):
-    cs = poly.coef
-    for i in range(len(cs)):
-        print('Power: ' + str(i))
-        print('Coefficient: ' + str(int(cs[i])))
-    print()
-
 def round_poly(poly: Polynomial, poly_mod: Polynomial, Q_l: int, debug=False):
     if poly.p.get_domain().__str__() != 'ZZ':
         raise Exception('Non-integer polynomial')
-    # if max(poly.p.all_coeffs()) > 0 and math.log2(max(poly.p.all_coeffs())) > 64:
-    #     print('Warning: coefficient has exceeded 64 bits!')
 
     poly = poly.rem(poly_mod)
     poly = poly.wrap_coefs(Q_l)
@@ -160,7 +122,7 @@ class Gen:
     def gen_error(n: int) -> Polynomial:
         coefs = np.random.normal(scale=1.5, size=n)
         coefs = [special_mod(int(coefs[i]), n) for i in range(n)]
-        d('gen_error', str(coefs))
+        d('gen_error', str(coefs), OutFlags.INFO_VERB)
         return Polynomial.from_coef(coefs, int(math.log2(n)))
 
     @staticmethod
@@ -176,7 +138,6 @@ class Gen:
             coeffs[i] = special_mod(random.randint(0, Q_l), Q_l)
 
         return Polynomial.from_coef(coeffs, int(math.log2(n)))
-
 
 class KeyGen:
     @staticmethod
@@ -209,20 +170,11 @@ class KeyGen:
 
         return sk, pk, ek
 
-
 class Ciphertext:
     def __init__(self, c0: Polynomial, c1: Polynomial, l: int):
         self.c0 = c0
         self.c1 = c1
         self.l = l
-
-class CipherTemp:
-    def __init__(self, c0: Polynomial, c1: Polynomial, c2: Polynomial, l: int):
-        self.c0 = c0
-        self.c1 = c1
-        self.l = l
-        self.c2 = c2
-
 
 class Encryptor:
     def __init__(self, pk, params: Params):
@@ -230,7 +182,8 @@ class Encryptor:
         self.params = params
 
     def encrypt(self, plaintext: Polynomial):
-        d('encrypt', 'poly: ' + str(plaintext.p))
+        d('encrypt', 'poly: ' + str(plaintext.p), OutFlags.INFO_VERB)
+
         v = Gen.gen_enc(self.params.N)
 
         e_0 = Gen.gen_error(self.params.N)
@@ -242,14 +195,11 @@ class Encryptor:
         c0 = c0.round_coefs_nearest()
         c1 = c1.round_coefs_nearest()
 
-        d('encrypt', 'c0: ' + str(c0.p))
-        d('encrypt', 'c1: ' + str(c1.p))
+        d('encrypt', 'c0: ' + str(c0.p), OutFlags.INFO_VERB)
+        d('encrypt', 'c1: ' + str(c1.p), OutFlags.INFO_VERB)
 
         c0 = c0.rem(self.params.poly_mod)
         c1 = c1.rem(self.params.poly_mod)
-
-        # c0 = c0.wrap_coefs(self.params.q_L)
-        # c1 = c1.wrap_coefs(self.params.q_L)
 
         return Ciphertext(c0, c1, self.params.L)
 
@@ -261,7 +211,7 @@ class Decryptor:
 
     def decrypt(self, ciphertext: Ciphertext):
         q_l = self.params.q_l(ciphertext.l)
-        d('decrypt', 'modulus: ' + str(q_l))
+        d('decrypt', 'modulus: ' + str(q_l), OutFlags.INFO_VERB)
 
         poly = ciphertext.c0 + ciphertext.c1 * self.sk[1]
 
@@ -304,19 +254,19 @@ class Evaluator:
         d0 = cipher1.c0 * cipher2.c0
         d1 = cipher1.c0 * cipher2.c1 + cipher1.c1 * cipher2.c0
         d2 = cipher1.c1 * cipher2.c1
-        d('time1', str(time.process_time() - start), debug_colours.BOLD)
+        d('time1', str(time.process_time() - start), OutFlags.INFO)
 
         start = time.process_time()
         d0 = d0.rem(self.params.poly_mod)
         d1 = d1.rem(self.params.poly_mod)
         d2 = d2.rem(self.params.poly_mod)
-        d('time2', str(time.process_time() - start), debug_colours.BOLD)
+        d('time2', str(time.process_time() - start), OutFlags.INFO)
 
         start = time.process_time()
         d0 = d0.wrap_coefs(q_l)
         d1 = d1.wrap_coefs(q_l)
         d2 = d2.wrap_coefs(q_l)
-        d('time3', str(time.process_time() - start), debug_colours.BOLD)
+        d('time3', str(time.process_time() - start), OutFlags.INFO)
 
         start = time.process_time()
         f0 = (self.ek[0] * d2).right_shift(self.params.logP)
@@ -324,17 +274,17 @@ class Evaluator:
 
         c0 = d0 + f0
         c1 = d1 + f1
-        d('time4', str(time.process_time() - start), debug_colours.BOLD)
+        d('time4', str(time.process_time() - start), OutFlags.INFO)
 
         start = time.process_time()
         c0 = c0.rem(self.params.poly_mod)
         c1 = c1.rem(self.params.poly_mod)
-        d('time5', str(time.process_time() - start), debug_colours.BOLD)
+        d('time5', str(time.process_time() - start), OutFlags.INFO)
 
         start = time.process_time()
         c0 = c0.wrap_coefs(q_l)
         c1 = c1.wrap_coefs(q_l)
-        d('time6', str(time.process_time() - start), debug_colours.BOLD)
+        d('time6', str(time.process_time() - start), OutFlags.INFO)
 
         return Ciphertext(c0, c1, cipher1.l)
 
@@ -348,7 +298,7 @@ class Evaluator:
         q_l = self.params.q_l(cipher.l)
         c0_new = c0_new.wrap_coefs(q_l)
         c1_new = c1_new.wrap_coefs(q_l)
-        d('time1', str(time.process_time() - start), debug_colours.BOLD)
+        d('time1', str(time.process_time() - start), OutFlags.INFO)
 
         return Ciphertext(c0_new, c1_new, cipher.l)
 
@@ -359,83 +309,54 @@ class Evaluator:
         return self.mul(cipher, cipher)
 
     def rescale(self, cipher: Ciphertext, diff=-1):
-        d('rescale', str(diff))
         q_l = self.params.q_l(cipher.l + diff)
 
-        d('rescale', 'upper modulus: ' + str(self.params.q_l(cipher.l)))
-        d('rescale', 'lower modulus: ' + str(q_l))
+        d('rescale', 'upper modulus: ' + str(self.params.q_l(cipher.l)), OutFlags.INFO_VERB)
+        d('rescale', 'lower modulus: ' + str(q_l), OutFlags.INFO_VERB)
 
         shift_amount = self.params.p * (-diff)
 
-        d('rescale', 'c0 before: ' + str(cipher.c0))
-        d('rescale', 'c1 before: ' + str(cipher.c1))
+        d('rescale', 'c0 before: ' + str(cipher.c0), OutFlags.INFO_VERB)
+        d('rescale', 'c1 before: ' + str(cipher.c1), OutFlags.INFO_VERB)
 
         cipher.c0 = cipher.c0.right_shift(shift_amount)
         cipher.c1 = cipher.c1.right_shift(shift_amount)
 
-        d('rescale', 'c0 after: ' + str(cipher.c0))
-        d('rescale', 'c1 after: ' + str(cipher.c1))
-
-        # cipher.c0 = cipher.c0.wrap_coefs(q_l)
-        # cipher.c1 = cipher.c1.wrap_coefs(q_l)
+        d('rescale', 'c0 after: ' + str(cipher.c0), OutFlags.INFO_VERB)
+        d('rescale', 'c1 after: ' + str(cipher.c1), OutFlags.INFO_VERB)
 
         cipher.l += diff
 
+if __name__ == '__main__':
+    N = 1024
+    params = Params(N, p=30, p_0=40, L=5)
 
-N = 1024
-params = Params(N, p=30, p_0=40, L=5)
+    print('Initialising scheme')
+    encoder = Encoder(params)
+    print('Generating keys')
 
-print('Initialising scheme')
-encoder = Encoder(params)
-print('Generating keys')
+    sk, pk, ek = KeyGen.gen(params)
 
-sk, pk, ek = KeyGen.gen(params)
+    encryptor = Encryptor(pk, params)
+    decryptor = Decryptor(sk, params)
+    evaluator = Evaluator(ek, params, encoder)
 
-encryptor = Encryptor(pk, params)
-decryptor = Decryptor(sk, params)
-evaluator = Evaluator(ek, params, encoder)
+    p_raw = np.zeros(N // 2) + 0.6
+    print('p: ' + str(p_raw[:10]))
 
-p_raw = np.zeros(N // 2) + 0.6
-#p_raw = np.random.uniform(-1, 1, N // 2)
+    q_raw = np.array([0.1 * i for i in range(N // 2)])
+    print('q: ' + str(q_raw[:10]))
 
-p = encoder.encode(p_raw)
-p_enc = encryptor.encrypt(p)
+    p = encoder.encode(p_raw)
+    p_enc = encryptor.encrypt(p)
+    q = encoder.encode(q_raw)
 
-q_raw = np.array([0.1 * i for i in range(N // 2)])
-# q_raw = np.random.uniform(-3, 3, N // 2)
-# q_raw[0:100] = 0
+    for _ in range(3):
+        d('main', 'Performing multiplication at level: ' + str(p_enc.l), OutFlags.INFO)
+        d('main', 'Modulus: ' + str(params.q_l(p_enc.l)), OutFlags.INFO)
+        r_enc = evaluator.mul_plain(p_enc, q)
+        evaluator.rescale(r_enc)
+        p_enc = r_enc
 
-q = encoder.encode(q_raw)
-
-for _ in range(3):
-    d('main', 'Performing multiplication at level: ' + str(p_enc.l), debug_colours.CYAN)
-    d('main', 'Modulus: ' + str(params.q_l(p_enc.l)), debug_colours.CYAN)
-    r_enc = evaluator.mul_plain(p_enc, q)
-    evaluator.rescale(r_enc)
-    p_enc = r_enc
-
-    r_dec = decryptor.decrypt(r_enc)
-
-d('main', str(encoder.decode(r_dec)), debug_colours.CYAN)
-
-
-# d('main', str(r_dec), debug_colours.BOLD)
-
-
-# q_enc = encryptor.encrypt(q)
-#
-# r_enc = evaluator.square(p_enc)
-# evaluator.rescale(r_enc)
-#
-# r_dec = decryptor.decrypt(r_enc)
-# print(encoder.decode(r_dec))
-#
-# r_enc = evaluator.square(r_enc)
-# evaluator.rescale(r_enc)
-#
-# r_dec = decryptor.decrypt(r_enc)
-# print(encoder.decode(r_dec))
-#
-#
-#
-#
+        r_dec = decryptor.decrypt(r_enc)
+        d('main', str(np.real(encoder.decode(r_dec)[:10])), OutFlags.INFO)

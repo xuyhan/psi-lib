@@ -1,11 +1,10 @@
-import numpy as np
-from batched_real_double import HERealDouble
-from batched_real_integer import HERealInteger
-from schemes import *
-from tqdm import tqdm
+from real.batched_real_double import HERealDouble
+from real.batched_real_integer import HERealInteger
+from crypto.schemes import *
+from tqdm.notebook import tqdm
 
-from lin_algebra import HEReal, HETensor, BatchedRealVec
-from low_lat import find_groups
+from model.lin_algebra import HEReal, HETensor, BatchedRealVec
+from model.low_lat import find_groups
 
 
 class Creator:
@@ -93,16 +92,3 @@ class Creator:
         for _ in range(num_rows):
             data.append(self.zero_vec(num_cols, batched_real))
         return HETensor(data)
-
-    def debug(self, he_tensor: HETensor, length: int) -> np.ndarray:
-        num_rows, num_cols = he_tensor.shape()
-
-        result = []
-
-        for i in range(num_rows):
-            row = []
-            for j in range(num_cols):
-                row.append(he_tensor.element(i, j).debug(length))
-            result.append(row)
-
-        return np.array(result)

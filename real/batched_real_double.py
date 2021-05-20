@@ -1,5 +1,6 @@
-from batched_real import HEReal
-from schemes import *
+from real.batched_real import HEReal
+from crypto.schemes import *
+
 
 class HERealDouble(HEReal):
     def __init__(self, v, scheme: SchemeCKKS):
@@ -23,6 +24,9 @@ class HERealDouble(HEReal):
 
     def add_in_place(self, he_real):
         self.scheme.add_in_place(self.ciphertext, he_real.ciphertext)
+
+    def sub_in_place(self, he_real):
+        self.scheme.sub_in_place(self.ciphertext, he_real.ciphertext)
 
     def add_raw_in_place(self, d):
         if isinstance(d, List):

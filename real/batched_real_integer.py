@@ -1,10 +1,11 @@
-from schemes import *
-from batched_real import HEReal
+from crypto.schemes import *
+from real.batched_real import HEReal
+
 
 class BatchedInteger:
     def __init__(self, v, scheme: CRTScheme):
         self.scheme = scheme
-        self.length = 5000
+        self.length = 8192
 
         if isinstance(v, CiphertextCRT):
             self.ciphertext = v

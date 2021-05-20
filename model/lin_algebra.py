@@ -1,10 +1,10 @@
 from typing import List
 
 import numpy as np
-from batched_real import HEReal
-from tqdm import tqdm
+from real.batched_real import HEReal
+from tqdm.notebook import tqdm
 
-from utils.utils import merge_ops
+from utils.utils import merge_ops, init_ops
 
 
 class BatchedRealVec:
@@ -66,6 +66,12 @@ class BatchedRealVec:
         for i in range(len(self.data)):
             self.data[i].add_in_place(batched_real_vec.data[i])
 
+    def sub_in_place(self, batched_real_vec):
+        self.__vec_enc_check(batched_real_vec)
+
+        for i in range(len(self.data)):
+            self.data[i].sub_in_place(batched_real_vec.data[i])
+
     def multiply_element_wise(self, batched_real_vec):
         self.__vec_enc_check(batched_real_vec)
 
@@ -75,12 +81,12 @@ class BatchedRealVec:
 
     def multiply_element_wise_plain(self, vec_raw):
         self.__vec_raw_check(vec_raw)
-        ops = {'multPC' : 0}
+        ops = init_ops()
         new_data = []
         for i in range(len(self.data)):
             if vec_raw[i] == 0:
                 continue
-            ops['multPC'] += 1
+            ops['mulPC'] += 1
             new_data.append(self.data[i].multiply_raw(vec_raw[i]))
         return BatchedRealVec(new_data), ops
 
@@ -97,7 +103,7 @@ class BatchedRealVec:
             batched_real.square_in_place()
 
     def get_sum(self):
-        ops = {'addCC' : 0}
+        ops = init_ops()
 
         if self.len() == 0:
             return None, ops
@@ -130,6 +136,7 @@ class BatchedRealVec:
     def __vec_raw_check(self, vec_raw):
         if self.len() != vec_raw.shape[0]:
             raise Exception("Length mismatch: %s != %s" % (len(self.data), len(vec_raw)))
+
 
 class HETensor:
     def __init__(self, data):
@@ -216,11 +223,18 @@ class HETensor:
         for i in range(self.shape()[0]):
             self.data[i].add_in_place(real_mat.data[i])
 
+    def sub_in_place(self, real_mat):
+        if self.shape() != real_mat.shape():
+            raise Exception("Error: cannot add matrices with different shapes.")
+
+        for i in range(self.shape()[0]):
+            self.data[i].sub_in_place(real_mat.data[i])
+
     def add_raw_in_place(self, raw_mat: np.ndarray):
         if self.shape() != raw_mat.shape:
             raise Exception('Shape mismatch in matrix add: %s != %s' % (self.shape(), raw_mat.shape))
 
-        ops = {'addPC': 0}
+        ops = init_ops()
 
         for i in range(self.shape()[0]):
             self.row(i).add_raw_in_place(raw_mat[i])
@@ -248,7 +262,7 @@ class HETensor:
 
     def mult(self, real_mat):
         if self.shape()[1] != real_mat.shape()[0]:
-            raise Exception("Error cannot multiply %s matrix with %s matrix" %(self.shape, real_mat.shape))
+            raise Exception("Error cannot multiply %s matrix with %s matrix" % (self.shape, real_mat.shape))
         data_new = []
         for i in range(self.shape()[0]):
             row_new = [None for _ in range(real_mat.shape()[1])]
@@ -261,7 +275,7 @@ class HETensor:
 
     def mult_plain(self, raw_mat: np.ndarray, creator):
         if self.shape()[1] != raw_mat.shape[0]:
-            raise Exception("Error cannot multiply %s matrix with %s matrix" %(self.shape(), raw_mat.shape))
+            raise Exception("Error cannot multiply %s matrix with %s matrix" % (self.shape(), raw_mat.shape))
 
         layer_mapped = creator.zero_mat(self.shape()[0], raw_mat.shape[1])
 
@@ -299,4 +313,3 @@ class HETensor:
 
     def noise(self):
         self.element(0, 0).noise()
-

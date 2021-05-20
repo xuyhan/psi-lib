@@ -1,7 +1,6 @@
 from typing import List
 
 from seal import *
-from seal_helper import *
 import numpy as np
 
 class CiphertextCRT:
@@ -13,6 +12,10 @@ class CiphertextCRT:
 
 class SchemeBase:
     def evaluate_ciphertext(self, ciphertext):
+        pass
+
+class DecryptorBase:
+    def decrypt(self, cipher: Ciphertext) -> Plaintext:
         pass
 
 class Scheme(SchemeBase):
@@ -28,9 +31,6 @@ class Scheme(SchemeBase):
     def encrypt(self, v: np.ndarray) -> Ciphertext:
         pass
 
-    def decrypt(self, cipher: Ciphertext) -> Plaintext:
-        pass
-
     def zero(self):
         pass
 
@@ -41,6 +41,9 @@ class Scheme(SchemeBase):
         pass
 
     def add_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
+        pass
+
+    def sub_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         pass
 
     def add_raw_in_place(self, cipher_a: Ciphertext, v: np.ndarray):
@@ -81,29 +84,13 @@ class Scheme(SchemeBase):
 
 
 class SchemeCKKS(Scheme):
-    def __init__(self, poly_modulus_degree, primes, scale_factor):
-        parms = EncryptionParameters(scheme_type.CKKS)
-        parms.set_poly_modulus_degree(poly_modulus_degree)
-        # base leve
-        parms.set_coeff_modulus(CoeffModulus.Create(poly_modulus_degree, primes))
-
-        context = SEALContext.Create(parms)
-
-        keygen = KeyGenerator(context)
-
-        public_key = keygen.public_key()
-        secret_key = keygen.secret_key()
-
-        self.encryptor = Encryptor(context, public_key)
-        self.evaluator = Evaluator(context)
-        self.decryptor = Decryptor(context, secret_key)
-        self.encoder = CKKSEncoder(context)
-
-        self.relin_keys = keygen.relin_keys()
-        self.gal_keys = keygen.galois_keys()
-        #self.gal_keys_s = keygen.galois_keys(uIntVector(g_keys))
-
-        self.default_scale = 2.0 ** scale_factor
+    def __init__(self, encryptor, evaluator, encoder, relin_keys, gal_keys, default_scale):
+        self.encryptor = encryptor
+        self.evaluator = evaluator
+        self.encoder = encoder
+        self.relin_keys = relin_keys
+        self.gal_keys = gal_keys
+        self.default_scale = default_scale
 
     def mod_switch(self, ciphertext_a: Ciphertext, to_switch):
         self.evaluator.mod_switch_to_inplace(to_switch, ciphertext_a.parms_id())
@@ -131,11 +118,6 @@ class SchemeCKKS(Scheme):
         self.encryptor.encrypt(self._batch_encode(v), ciphertext)
         return ciphertext
 
-    def decrypt(self, cipher: Ciphertext) -> Plaintext:
-        plaintext = Plaintext()
-        self.decryptor.decrypt(cipher, plaintext)
-        return plaintext
-
     def zero(self):
         return self.encrypt(np.array([0]))
 
@@ -150,6 +132,10 @@ class SchemeCKKS(Scheme):
     def add_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
         self.mod_switch(cipher_a, cipher_b)
         self.evaluator.add_inplace(cipher_a, cipher_b)
+
+    def sub_in_place(self, cipher_a: Ciphertext, cipher_b: Ciphertext):
+        self.mod_switch(cipher_a, cipher_b)
+        self.evaluator.sub_inplace(cipher_a, cipher_b)
 
     def add_raw(self, cipher_a: Ciphertext, v: np.ndarray) -> Ciphertext:
         plaintext = self._batch_encode(v)
@@ -368,7 +354,6 @@ class SchemeBFV(Scheme):
 
         return budget
 
-
 class CRTScheme(SchemeBase):
     def __init__(self, poly_modulus_degree, qs, default_scale, default_weight_scale):
         self.schemes = []
@@ -457,15 +442,45 @@ class CRTScheme(SchemeBase):
         for i in range(self.n):
             self.schemes[i].evaluate_ciphertext(ciphertext.get(i))
 
+class DecryptorCKKS(DecryptorBase):
+    def __init__(self, decryptor):
+        self.decryptor = decryptor
 
-def get_bfv_scheme(poly_mods, plaintext_mods, scale, default_weight_scale):
-    scheme = CRTScheme(
-        poly_mods, plaintext_mods, scale, default_weight_scale
-    )
-    return scheme
+    def decrypt(self, cipher: Ciphertext) -> Plaintext:
+        plaintext = Plaintext()
+        self.decryptor.decrypt(cipher, plaintext)
+        return plaintext
 
-def get_ckks_scheme(poly_mods, primes, scale_factor):
-    scheme = SchemeCKKS(
-        poly_mods, primes, scale_factor
-    )
-    return scheme
+def init_scheme_ckks(poly_mod_degree, primes, scale_factor):
+    params = EncryptionParameters(scheme_type.CKKS)
+    params.set_poly_modulus_degree(poly_mod_degree)
+    params.set_coeff_modulus(CoeffModulus.Create(poly_mod_degree, primes))
+
+    context = SEALContext.Create(params)
+
+    keygen = KeyGenerator(context)
+
+    public_key = keygen.public_key()
+    secret_key = keygen.secret_key()
+
+    encryptor = Encryptor(context, public_key)
+    evaluator = Evaluator(context)
+    decryptor = Decryptor(context, secret_key)
+    encoder = CKKSEncoder(context)
+
+    relin_keys = keygen.relin_keys()
+    gal_keys = keygen.galois_keys()
+
+    default_scale = 2.0 ** scale_factor
+
+    return SchemeCKKS(
+        encryptor, evaluator, encoder, relin_keys, gal_keys, default_scale
+    ), DecryptorCKKS(decryptor)
+
+
+
+
+
+
+
+
